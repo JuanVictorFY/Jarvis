@@ -16,3 +16,4 @@ export async function fileToImageData(file: File): Promise<ImageData> {
     reader.readAsDataURL(file);
   });
 }
+// multimodal patch 1
