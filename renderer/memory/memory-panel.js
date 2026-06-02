@@ -19,3 +19,4 @@ class MemoryPanel {
   }
 }
 module.exports = MemoryPanel;
+
