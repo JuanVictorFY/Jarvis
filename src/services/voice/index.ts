@@ -1,0 +1,1 @@
+export { SpeechProcessor } from './SpeechProcessor';
