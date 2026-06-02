@@ -20,3 +20,4 @@ export function reportError(err: unknown): void {
 export function getReports(): ErrorReport[] {
   return [...reports];
 }
+// tested
