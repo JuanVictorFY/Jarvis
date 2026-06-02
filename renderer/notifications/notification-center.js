@@ -20,3 +20,4 @@ class NotificationCenter {
 }
 module.exports = NotificationCenter;
 // patch 1
+// patch 2
