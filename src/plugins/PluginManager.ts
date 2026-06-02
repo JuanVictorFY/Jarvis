@@ -37,3 +37,4 @@ export class PluginManager {
   isActive(id: string): boolean { return this.active.has(id); }
 }
 // patch 1
+// patch 2
