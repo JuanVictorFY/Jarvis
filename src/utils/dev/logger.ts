@@ -5,3 +5,4 @@ export function createLogger(ns: string) {
     console.log(`${colors[level]}[${ns}][${level.toUpperCase()}]\x1b[0m ${msg}`, ...args);
   };
 }
+// patch 1
