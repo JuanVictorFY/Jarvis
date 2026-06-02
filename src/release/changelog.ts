@@ -4,3 +4,4 @@ export const CHANGELOG = [
 // release patch 1
 // release patch 2
 // release patch 3
+// release patch 4
