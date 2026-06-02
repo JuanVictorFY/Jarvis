@@ -27,3 +27,4 @@ class VoiceInput {
   stop()  { this.recognition?.stop();  this.active = false; this.buttonEl.classList.remove('active'); }
 }
 module.exports = VoiceInput;
+// patch 1
