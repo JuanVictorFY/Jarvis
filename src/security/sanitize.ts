@@ -11,3 +11,4 @@ export function sanitizePath(input: string): string {
   return input.replace(/\.\.\//g, '').replace(/\\/g, '/');
 }
 // security patch 1
+// security patch 2
