@@ -13,6 +13,7 @@
   <img alt="Claude" src="https://img.shields.io/badge/Claude-Anthropic-D97757?style=flat-square" />
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey?style=flat-square" />
   <img alt="License" src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" />
+  <img alt="Tests" src="https://img.shields.io/badge/tests-node%3Atest-brightgreen?style=flat-square" />
 </p>
 
 ---
@@ -20,6 +21,7 @@
 ## Table of Contents
 
 - [Overview](#overview)
+- [What's New](#whats-new)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Requirements](#requirements)
@@ -33,6 +35,7 @@
 - [Keyboard Shortcuts](#keyboard-shortcuts)
 - [Security](#security)
 - [Development](#development)
+- [Testing](#testing)
 - [Roadmap](#roadmap)
 - [License](#license)
 
@@ -40,91 +43,119 @@
 
 ## Overview
 
-Jarvis is a standalone desktop agent that combines a rich chat interface with deep tool integrations, a persistent memory store, multi-provider AI support, and an extensible plugin architecture. It is designed as a foundation for building serious AI-powered developer tooling — not a toy prototype.
+Jarvis is a standalone desktop agent that combines a rich streaming chat interface with deep tool integrations, a persistent memory store, multi-provider AI support, and an extensible plugin architecture. It is designed as a foundation for building serious AI-powered developer tooling — not a toy prototype.
 
 Key design principles:
 
-- **Streaming-first** — every response renders token by token; the UI never blocks.
+- **Streaming-first** — every response renders token by token using `messages.stream()`; the UI never blocks waiting for a complete response.
+- **Cost-aware** — Anthropic prompt caching is applied to the system prompt and tool definitions on every call, reducing input token costs by up to 90% on repeated interactions.
 - **Provider-agnostic** — swap between Anthropic Claude, OpenAI, Google Gemini, and local Ollama models without touching your workflow.
 - **Extensible by design** — the plugin system lets you add custom tools, UI panels, and message hooks at runtime.
-- **Offline-capable** — memory, history, and settings persist locally; only AI inference requires a network connection.
+- **Resilient** — agent loops have a 5-minute IPC timeout, token-aware history trimming prevents context overflow, and every tool input is validated before execution.
+- **Offline-capable** — memory, history, settings, and window state persist locally; only AI inference requires a network connection.
+
+---
+
+## What's New
+
+### Latest improvements
+
+| Area | Change |
+|---|---|
+| **Streaming** | Switched to `client.messages.stream()` — text now renders token by token instead of arriving all at once |
+| **Prompt caching** | `cache_control: { type: 'ephemeral' }` applied to system prompt and tool definitions — up to 90% cost reduction on repeated calls |
+| **History management** | Token-aware trimming with an 80k-token budget replaces the old fixed-count approach |
+| **Tool validation** | Required fields from each tool's JSON schema are validated before execution — no more cryptic runtime errors |
+| **Token stats** | Real `input_tokens` / `output_tokens` from each API response accumulate in the header bar |
+| **IPC timeout** | Agent loops auto-cancel after 5 minutes and surface a clear error message |
+| **Window state** | Size, position, and maximized state persist across restarts via `WindowStateService` |
+| **Memory IPC** | `MemoryStore` + `MemoryPersistence` fully wired — memory survives app restarts and is accessible from the renderer |
+| **History IPC** | `ConversationHistory` exposed via IPC — create, list, delete, and add messages from the renderer |
+| **Notifications IPC** | `NotificationService` wired — toasts fire in the renderer whenever a notification is sent from any process |
+| **Settings panel** | Now includes OpenAI, Gemini, Ollama, default provider, and theme fields |
+| **CSP hardened** | Removed `unsafe-inline` from `script-src` — all renderer JS lives in `app.js`, loaded as `'self'` |
+| **Browser fallback** | `BrowserService` now tries 10 Chrome/Edge/Chromium paths and falls back to plain HTTP when none are found |
+| **Structured logger** | `createLogger(namespace)` replaces all `console.log` calls in the main process — coloured, timestamped, namespaced output |
+| **Unit tests** | 4 test suites using Node.js built-in `node:test` — no external test runner required |
 
 ---
 
 ## Features
 
 ### AI Chat & Streaming
-- Real-time token-by-token streaming via `@anthropic-ai/sdk`
-- Full Markdown rendering with syntax-highlighted code blocks (light + dark)
-- Per-session **token counter** and cumulative **cost tracking** displayed in the status bar
-- Graceful error surfaces — API failures appear inline, never silently swallowed
+- True token-by-token streaming via `client.messages.stream()` — text appears as it is generated
+- Anthropic **prompt caching** on system prompt and tool definitions — costs drop dramatically on long sessions
+- Full Markdown rendering with syntax-highlighted code blocks
+- **Live token counter** in the header: session input and output tokens updated after every response
+- 5-minute agent timeout with user-visible error message
+- Graceful error surfaces — failures appear inline, never silently swallowed
 
 ### Conversation History
-- Persistent conversation store with full CRUD
+- Persistent conversation store with full CRUD, exposed via IPC
 - Sidebar with title, last-updated timestamp, and one-click deletion
-- Auto-title generation from the first user message
+- Conversations sorted by most recently updated
 
 ### Memory System
-- Key-value memory store with UUID-based entries and createdAt / updatedAt timestamps
-- File-backed JSON persistence — survives app restarts
+- Key-value store with UUID-based entries and `createdAt` / `updatedAt` timestamps
+- **File-backed JSON persistence** — automatically saved on every write and on app exit, restored on startup
 - Full-text search across all keys and values
 - JSON and CSV export / import
-- Live memory panel showing all stored entries
+- Live memory panel in the renderer, accessible via `window.jarvis.memory`
 
 ### Voice Input
 - Web Speech API integration with continuous mode and interim result display
 - Real-time frequency-bar visualizer using the Web Audio API
 - Silence detection, noise cancellation config, and session recording
-- Fallback service for browsers/environments without native speech support
+- Fallback service for environments without native speech support
 
 ### Multi-Provider AI
-- **Anthropic Claude** (Opus, Sonnet, Haiku) — default provider
+- **Anthropic Claude** (Opus 4.8, Sonnet 4.6, Haiku 4.5) — default provider
 - **OpenAI** (GPT-4o, GPT-4-turbo, GPT-3.5-turbo)
 - **Google Gemini** (gemini-1.5-pro, gemini-1.5-flash)
-- **Ollama** — any locally running model
-- Provider health checker, automatic fallback, and per-provider metrics
-- Live provider selector in the toolbar — switch mid-conversation
+- **Ollama** — any locally running model via `http://localhost:11434`
+- Provider health checker, automatic fallback, and per-provider usage metrics
+- Live provider selector — switch mid-session from the settings panel
 
 ### Plugin System
 - Register plugins at runtime with `activate` / `deactivate` lifecycle hooks
-- Dynamic plugin loader — drop a `.js` or `.ts` file, no rebuild needed
+- Dynamic plugin loader — drop a compiled `.js` file, no rebuild needed
 - Plugin store with enable/disable toggles persisted across sessions
 - Full access to the message send / receive API
 
 ### Enhanced Tools
-- Central `ToolRegistry` — register, introspect, and execute tools by name
-- Input schema validation per tool
-- Tool selector UI for manual tool invocation
+- Six built-in tools: `read_file`, `write_file`, `list_directory`, `run_command`, `browse_url`, `search_web`
+- Central `ToolRegistry` — register, introspect, and execute additional tools by name
+- **Runtime input validation** against each tool's JSON schema before execution
+- Destructive tools (`write_file`, `run_command`) require explicit modal confirmation
 
 ### Notifications
-- In-app notification center with `info`, `success`, `warning`, and `error` levels
-- Unread badge with 99+ cap
-- Listener-based subscription API for programmatic notifications
+- In-app toast system with `info`, `success`, `warning`, and `error` levels
+- `NotificationService` IPC — send notifications from the main process, displayed instantly in the renderer
+- Unread badge and notification center
 
 ### UI & Themes
-- Five built-in themes: **Dark**, **Light**, **Solarized**, **Nord**, **Dracula**
-- Theme preference persisted in `localStorage`
+- Five built-in themes: **Dark**, **Light**, **Solarized**, **Nord**, **Dracula** — selectable from settings
 - Collapsible sidebar, modal system, and tooltip singleton
 - Input autocomplete with async suggestion support
 - Scroll controls FAB with auto-scroll and unread message badge
-- Message search with text highlighting, previous/next navigation, and result count
-- Keyboard shortcuts overlay (`Ctrl+/`) listing every available shortcut
+- In-conversation message search with text highlighting and result count
+- Keyboard shortcuts overlay listing every available shortcut
 
 ### Error Handling
-- Global `window.onerror` and `unhandledrejection` interceptors
+- Global `window.onerror` and `unhandledrejection` interceptors in the renderer
 - User-facing toast notifications for recoverable errors
-- Scrollable error log viewer with timestamp and level
 - Typed `AppError` / `NetworkError` / `AuthError` hierarchy in the main process
-- Middleware wrapper for async handlers with automatic error reporting
+- Middleware wrapper for async IPC handlers with automatic error reporting
 
 ### Security
+- `script-src 'self'` CSP — no inline scripts anywhere in the renderer
 - HTML and path sanitization utilities against XSS and path traversal
-- Content Security Policy enforced on all renderer windows
-- Terminal commands require explicit modal confirmation before execution
-- No external telemetry — all data stays on your machine
+- Terminal commands require explicit modal confirmation
+- No external telemetry — all data stays on-device
+- API keys stored via `SecureStorageService`
 
 ### Multimodal Input *(experimental)*
-- Image attachment support: drag-and-drop or file picker
+- Image attachment support via drag-and-drop or file picker
 - Automatic File → base64 conversion for vision-capable models
 - Preview strip with per-image removal
 
@@ -134,81 +165,103 @@ Key design principles:
 
 ```
 jarvis/
-├── src/                          # Main process (TypeScript)
-│   ├── main.ts                   # Electron entry point
-│   ├── preload.ts                # Context bridge — typed IPC surface
-│   ├── constants.ts              # App-wide constants
-│   ├── errors.ts                 # Top-level error types
-│   ├── errors/                   # AppError hierarchy + reporter + middleware
-│   ├── security/                 # sanitizeHTML, sanitizePath
-│   ├── providers/                # AI provider implementations + registry
-│   │   ├── ProviderRegistry.ts
+├── src/                              # Main process (TypeScript)
+│   ├── main.ts                       # Electron entry — wires all services and IPC handlers
+│   ├── preload.ts                    # Context bridge — typed IPC surface for the renderer
+│   ├── constants.ts
+│   ├── errors/                       # AppError hierarchy, reporter, middleware
+│   ├── security/                     # sanitizeHTML, sanitizePath
+│   ├── providers/                    # AI provider layer
+│   │   ├── ProviderRegistry.ts       # Active provider selection
 │   │   ├── AnthropicProvider.ts
 │   │   ├── OpenAIProvider.ts
 │   │   ├── GeminiProvider.ts
 │   │   ├── OllamaProvider.ts
-│   │   └── …(metrics, fallback, health, cache, token counter)
-│   ├── services/                 # Business logic services
-│   │   ├── memory/               # MemoryStore, MemoryPersistence, search, export
-│   │   ├── history/              # ConversationHistory
-│   │   ├── notifications/        # NotificationService
-│   │   ├── voice/                # SpeechProcessor
-│   │   ├── ThemeService.ts
-│   │   ├── VoiceService.ts
-│   │   ├── UpdateCheckerService.ts
-│   │   └── …(file watcher, crash reporter, secure storage, system info)
-│   ├── plugins/                  # PluginManager, PluginLoader, PluginStore
-│   ├── tools/                    # ToolRegistry + enhanced tool definitions
-│   ├── ipc/                      # IPC channel definitions and handlers
-│   ├── types/                    # Shared TypeScript types (config, agent, IPC)
-│   ├── utils/                    # Pure utilities (logger, retry, debounce, …)
-│   └── experimental/
-│       └── multimodal/           # ImageInput, base64 conversion
+│   │   └── …(metrics, fallback, health checker, cost estimator, token counter)
+│   ├── services/
+│   │   ├── ClaudeService.ts          # Agent loop — streaming, caching, history, tool dispatch
+│   │   ├── ConfigService.ts          # Typed settings with file persistence
+│   │   ├── WindowStateService.ts     # Window size/position persistence
+│   │   ├── BrowserService.ts         # Headless Chrome + HTTP fallback
+│   │   ├── FileSystemService.ts
+│   │   ├── ShellService.ts
+│   │   ├── memory/                   # MemoryStore, MemoryPersistence, search, export
+│   │   ├── history/                  # ConversationHistory
+│   │   ├── notifications/            # NotificationService
+│   │   ├── voice/                    # SpeechProcessor
+│   │   └── …(file watcher, crash reporter, secure storage, system info, update checker)
+│   ├── plugins/                      # PluginManager, PluginLoader, PluginStore
+│   ├── tools/
+│   │   ├── toolDefinitions.ts        # Tool schemas + TOOLS_WITH_CACHE
+│   │   ├── toolRegistry.ts           # Enhanced runtime registry
+│   │   └── enhanced/                 # ToolRegistry class
+│   ├── ipc/                          # Channel constants and typed handlers
+│   ├── types/                        # AgentEvent, JarvisConfig, shared interfaces
+│   ├── utils/
+│   │   ├── dev/logger.ts             # createLogger — namespaced, coloured, timestamped
+│   │   ├── tokenUtils.ts             # estimateTokens, truncateToTokenBudget
+│   │   └── …(retry, debounce, cache, event bus, formatters, …)
+│   ├── tests/                        # node:test unit test suites
+│   │   ├── tokenUtils.test.ts
+│   │   ├── memoryStore.test.ts
+│   │   ├── notificationService.test.ts
+│   │   └── conversationHistory.test.ts
+│   └── experimental/multimodal/      # ImageInput, base64 conversion
 │
-├── renderer/                     # Renderer process (vanilla JS + CSS)
-│   ├── index.html                # App shell
-│   ├── styles.css                # Global styles
-│   ├── animations.css            # Keyframe animations
-│   ├── syntax-highlight.css      # Code block theme variables
-│   ├── syntax-highlight.js       # Runtime syntax highlighter
-│   ├── theme-manager.js          # CSS variable injection per theme
-│   ├── themes/                   # dark.css, light.css, …
-│   ├── status-bar.js             # Connection • model • token display
-│   ├── message-search.js         # In-conversation search
-│   ├── scroll-controls.js        # Auto-scroll FAB + unread badge
+├── renderer/                         # Renderer process (vanilla JS + CSS)
+│   ├── index.html                    # App shell — no inline scripts
+│   ├── app.js                        # All renderer logic (extracted from HTML)
+│   ├── styles.css                    # Global styles + token stats + toasts
+│   ├── animations.css
+│   ├── syntax-highlight.css / .js
+│   ├── theme-manager.js
+│   ├── themes/                       # dark.css, light.css, solarized.css, nord.css, dracula.css
+│   ├── status-bar.js
+│   ├── message-search.js
+│   ├── scroll-controls.js
 │   ├── keyboard-shortcuts-overlay.js
 │   ├── welcome-screen.js
-│   ├── error-handling/           # ErrorBoundary, ErrorToast, ErrorLogViewer
-│   ├── memory/                   # MemoryPanel, MemorySearchUI
-│   ├── history/                  # HistorySidebar
-│   ├── notifications/            # NotificationCenter, NotificationBadge
-│   ├── plugins/                  # PluginList
-│   ├── providers/                # ProviderSelector
-│   ├── tools/                    # ToolSelector
-│   ├── voice/                    # VoiceInput, VoiceVisualizer
-│   ├── multimodal/               # ImagePreview
-│   └── ui/                       # ThemeSwitcher, Sidebar, Modal, Tooltip, Autocomplete
+│   ├── error-handling/               # ErrorBoundary, ErrorToast, ErrorLogViewer
+│   ├── memory/                       # MemoryPanel, MemorySearchUI
+│   ├── history/                      # HistorySidebar
+│   ├── notifications/                # NotificationCenter, NotificationBadge
+│   ├── plugins/                      # PluginList
+│   ├── providers/                    # ProviderSelector
+│   ├── tools/                        # ToolSelector
+│   ├── voice/                        # VoiceInput, VoiceVisualizer
+│   ├── multimodal/                   # ImagePreview
+│   └── ui/                           # ThemeSwitcher, Sidebar, Modal, Tooltip, Autocomplete
 │
-├── assets/                       # App icons (png, ico, icns)
-├── scripts/                      # Build and dev scripts
+├── assets/                           # App icons (png, ico, icns)
+├── scripts/                          # Dev and build helper scripts
 ├── package.json
 └── tsconfig.json
 ```
 
 ### IPC Communication Pattern
 
-All communication between the main process and the renderer follows a **typed message-passing** contract via `contextBridge`. No `any`, no untyped payloads.
+All communication between the main process and the renderer uses a **typed message-passing** contract via `contextBridge`. Every channel is explicitly declared in `preload.ts` — no `any`, no untyped payloads.
 
 ```
-Renderer                            Main Process
-   │  invoke('chat:send', payload)      │
-   │ ─────────────────────────────────▶ │
-   │                                    │── Provider.stream()
-   │  on('chat:chunk', token)           │        │
-   │ ◀─────────────────────────────────│◀───────┘
-   │  on('chat:done', stats)            │
-   │ ◀─────────────────────────────────│
+Renderer                              Main Process
+   │  jarvis.sendMessage(text)            │
+   │ ──────────────────────────────────▶  │
+   │                                      │── ClaudeService.agentLoop()
+   │  on('agent:event', { type:'text' })  │     │  messages.stream()
+   │ ◀──────────────────────────────────  │ ◀───┘  (per token)
+   │  on('agent:event', { type:'done',    │
+   │       inputTokens, outputTokens })   │
+   │ ◀──────────────────────────────────  │
 ```
+
+**Available IPC namespaces exposed on `window.jarvis`:**
+
+| Namespace | Methods |
+|---|---|
+| *(root)* | `sendMessage`, `clearHistory`, `confirmAction`, `onAgentEvent`, `getConfig`, `saveConfig`, `onOpenSettings`, `openExternal` |
+| `memory` | `set`, `get`, `delete`, `all` |
+| `history` | `create`, `all`, `delete`, `addMessage` |
+| `notifications` | `send`, `all`, `unread`, `markRead`, `onNew` |
 
 ---
 
@@ -219,6 +272,7 @@ Renderer                            Main Process
 | Node.js | 18 or higher |
 | npm | 9 or higher |
 | Anthropic API key | Required for Claude (default provider) |
+| Chrome / Edge / Chromium | Optional — enables `browse_url` and `search_web` tools |
 
 Optional: API keys for OpenAI, Google Gemini, or a running Ollama instance.
 
@@ -247,51 +301,52 @@ Outputs an NSIS installer (Windows) or DMG (macOS) in `dist/`.
 
 ## Configuration
 
-On first launch Jarvis will prompt for your Anthropic API key. You can also set it — and all other options — via the **Settings** panel inside the app.
+On first launch Jarvis prompts for your Anthropic API key. All settings are also accessible from the **⚙ Settings** panel inside the app and are stored locally in `~/.config/Jarvis/jarvis-config.json`.
 
-| Key | Default | Description |
+| Setting | Default | Description |
 |---|---|---|
-| `anthropicApiKey` | `""` | Anthropic API key (required for Claude) |
+| `anthropicApiKey` | `""` | Anthropic API key — required for Claude |
+| `model` | `claude-sonnet-4-6` | Claude model to use |
+| `maxTokens` | `8192` | Max tokens per response |
 | `openaiApiKey` | `""` | OpenAI API key |
 | `geminiApiKey` | `""` | Google Gemini API key |
-| `ollamaBaseUrl` | `http://localhost:11434` | Ollama server URL |
-| `defaultProvider` | `anthropic` | Active AI provider on startup |
-| `defaultModel` | `claude-sonnet-4-6` | Default model for the active provider |
-| `maxTokens` | `8192` | Maximum tokens per response |
-| `theme` | `dark` | UI theme (`dark` \| `light` \| `solarized` \| `nord` \| `dracula`) |
-| `memoryPersistPath` | `~/.jarvis/memory.json` | Path for memory store persistence |
+| `ollamaBaseUrl` | `http://localhost:11434` | Ollama server base URL |
+| `defaultProvider` | `anthropic` | Active provider on startup |
+| `theme` | `dark` | UI theme — `dark`, `light`, `solarized`, `nord`, `dracula` |
 
 ---
 
 ## Usage
 
 1. **Start a conversation** — type in the chat input and press `Enter`.
-2. **Switch providers** — use the provider dropdown in the toolbar; the switch takes effect on the next message.
-3. **Apply code** — every code block in the response has a one-click **Copy** button; shell blocks have an additional **Run** button that requires confirmation.
-4. **Save context to memory** — use the memory panel (`Ctrl+M`) to store key facts that persist across sessions.
-5. **Search history** — press `Ctrl+F` to search within the current conversation.
-6. **Use voice** — click the microphone button or press `Ctrl+Shift+V` to start voice input.
-7. **Manage plugins** — open the plugin panel (`Ctrl+P`) to enable, disable, or load new plugins.
+2. **Watch it stream** — response text appears token by token as Claude generates it.
+3. **Check token usage** — the header shows `in X · out Y` updated after every response.
+4. **Run code** — shell blocks have a **▶ Run** button; Jarvis asks for confirmation before executing.
+5. **Switch providers** — open Settings (`⚙`) and change the Default Provider; takes effect on the next message.
+6. **Persist context** — use `window.jarvis.memory.set(key, value)` or the memory panel to save facts across sessions.
+7. **Search the conversation** — press `Ctrl+F` to highlight and navigate matches.
+8. **Use voice** — click the microphone or press `Ctrl+Shift+V`.
+9. **Manage plugins** — enable / disable from the plugin panel (`Ctrl+P`).
 
 ---
 
 ## AI Providers
 
-| Provider | Models | Streaming | Vision |
-|---|---|---|---|
-| Anthropic Claude | claude-opus-4-8, claude-sonnet-4-6, claude-haiku-4-5 | ✅ | ✅ |
-| OpenAI | gpt-4o, gpt-4-turbo, gpt-3.5-turbo | ✅ | ✅ |
-| Google Gemini | gemini-1.5-pro, gemini-1.5-flash | ✅ | ✅ |
-| Ollama (local) | any installed model | ✅ | model-dependent |
+| Provider | Models | Streaming | Vision | Notes |
+|---|---|---|---|---|
+| Anthropic Claude | claude-opus-4-8, claude-sonnet-4-6, claude-haiku-4-5 | ✅ | ✅ | Default; prompt caching enabled |
+| OpenAI | gpt-4o, gpt-4-turbo, gpt-3.5-turbo | ✅ | ✅ | |
+| Google Gemini | gemini-1.5-pro, gemini-1.5-flash | ✅ | ✅ | |
+| Ollama (local) | any installed model | ✅ | model-dependent | No API key required |
 
-The `ProviderFallback` service automatically retries on a secondary provider if the primary fails. The `ProviderHealthChecker` runs periodic pings and surfaces degraded status in the status bar.
+`ProviderFallback` retries on a secondary provider if the primary fails. `ProviderHealthChecker` runs periodic pings and surfaces degraded status in the status bar.
 
 ---
 
 ## Plugin System
 
 ```ts
-// example-plugin.ts
+// my-plugin.ts
 import type { Plugin, PluginAPI } from './src/plugins';
 
 const myPlugin: Plugin = {
@@ -309,18 +364,17 @@ const myPlugin: Plugin = {
 export default myPlugin;
 ```
 
-Drop the compiled file into `plugins/` and enable it from the plugin panel — no restart required.
+Compile the file and drop it in `plugins/` — enable it from the plugin panel with no restart required.
 
 ---
 
 ## Voice Input
 
-Voice input uses the browser's **Web Speech API** (Chromium, bundled with Electron). For environments without native speech support, a `VoiceFallbackService` is available.
+Voice input uses Chromium's built-in **Web Speech API**. For environments without native speech support, `VoiceFallbackService` is available.
 
-Supported features:
 - Continuous mode with automatic punctuation
 - Interim results displayed as ghost text while speaking
-- Real-time frequency visualizer (Web Audio API)
+- Real-time frequency-bar visualizer via Web Audio API
 - Configurable silence detection timeout
 - Session recording with timestamp log
 
@@ -328,16 +382,17 @@ Supported features:
 
 ## Memory System
 
-The memory system is a lightweight, schema-free key-value store that persists to disk as JSON.
+The memory system is a schema-free key-value store that persists to disk as JSON. It is restored automatically on startup.
 
-```ts
-// Programmatic access via IPC
-await window.jarvis.memory.set('user-preferences', { theme: 'nord' });
-const prefs = await window.jarvis.memory.get('user-preferences');
-const results = await window.jarvis.memory.search('theme');
+```js
+// Renderer — via window.jarvis.memory
+await jarvis.memory.set('project', { name: 'Jarvis', version: '0.2.0' });
+const data  = await jarvis.memory.get('project');
+const all   = await jarvis.memory.all();
+await jarvis.memory.delete('project');
 ```
 
-Exports are available in JSON and CSV format from the memory panel UI.
+Data is written to `~/.config/Jarvis/memory.json` after every mutation and on app exit.
 
 ---
 
@@ -347,6 +402,7 @@ Exports are available in JSON and CSV format from the memory panel UI.
 |---|---|
 | `Enter` | Send message |
 | `Shift+Enter` | Insert newline |
+| `Ctrl+Shift+J` | Toggle app window (global) |
 | `Ctrl+F` | Search in conversation |
 | `Ctrl+M` | Open memory panel |
 | `Ctrl+P` | Open plugin panel |
@@ -360,12 +416,13 @@ Exports are available in JSON and CSV format from the memory panel UI.
 
 ## Security
 
-- **HTML sanitization** — all user-supplied and AI-generated content is sanitized before DOM injection to prevent XSS.
-- **Path sanitization** — file paths from tool calls are sanitized to prevent path traversal.
-- **Content Security Policy** — enforced on all renderer windows; no inline scripts, no external resources.
-- **Terminal confirmation** — shell commands are never executed automatically; a modal presents the full command and requires explicit user approval.
-- **Local-only storage** — no telemetry, no crash reporting to external services. All data (memory, history, settings) is stored on-device.
-- **Secure credential storage** — API keys are stored via `SecureStorageService`, not in plain text config files.
+- **`script-src 'self'`** — all renderer JavaScript lives in `app.js`; `unsafe-inline` has been removed from the Content Security Policy.
+- **HTML sanitization** — user-supplied and AI-generated content is sanitized via `escHtml()` before DOM injection to prevent XSS.
+- **Path sanitization** — file paths from tool calls are sanitized to prevent path traversal attacks.
+- **Terminal confirmation** — `run_command` and `write_file` always present a modal requiring explicit user approval before execution.
+- **Local-only storage** — no external telemetry. All data (memory, history, settings, window state) is stored on-device only.
+- **Secure credential storage** — API keys are handled by `SecureStorageService` and never stored in plain text.
+- **IPC surface minimised** — `contextBridge` exposes only explicitly declared methods; `nodeIntegration` is disabled.
 
 ---
 
@@ -384,13 +441,14 @@ npm run watch
 # Start the app (compiles first)
 npm run dev
 
-# Build distributable
+# Run unit tests
+npm test
+
+# Build distributable installer / DMG
 npm run build
 ```
 
-### TypeScript
-
-The project uses strict TypeScript throughout:
+### TypeScript configuration
 
 ```json
 {
@@ -405,28 +463,46 @@ The project uses strict TypeScript throughout:
 
 ### Adding a new AI provider
 
-1. Create `src/providers/MyProvider.ts` implementing the `AIProvider` interface.
+1. Create `src/providers/MyProvider.ts` implementing `AIProvider`.
 2. Register it in `src/providers/ProviderFactory.ts`.
 3. Add its models to `src/providers/ProviderCapabilities.ts`.
-4. Optionally add a settings entry in `src/types/config.ts`.
+4. Add API key field to `JarvisConfig` in `src/types/index.ts` and the settings panel in `renderer/index.html`.
 
 ### Adding a new tool
 
-1. Create a class implementing `Tool` from `src/tools/enhanced/ToolRegistry.ts`.
-2. Call `registry.register(myTool)` in `src/main.ts` (or a plugin's `activate`).
+1. Implement the `Tool` interface from `src/tools/enhanced/ToolRegistry.ts`.
+2. Add it to `src/tools/toolDefinitions.ts` and the `ToolName` union.
+3. Handle it in `ClaudeService.executeTool()`.
+
+---
+
+## Testing
+
+Tests use Node.js's built-in `node:test` runner — no additional dependencies required.
+
+```bash
+npm test
+```
+
+| Suite | Covers |
+|---|---|
+| `tokenUtils.test.ts` | `estimateTokens`, `truncateToTokenBudget`, `extractSignatures` |
+| `memoryStore.test.ts` | `MemoryStore` CRUD, id stability, complex values |
+| `notificationService.test.ts` | send, read, unread filter, listener subscribe/unsubscribe |
+| `conversationHistory.test.ts` | create, addMessage, sort order, delete, error on bad id |
 
 ---
 
 ## Roadmap
 
 - [ ] Diff view before applying AI-suggested code changes
-- [ ] Multi-file workspace context (send multiple files in one prompt)
-- [ ] Agent mode — autonomous multi-step task execution with tool use
+- [ ] Multi-file workspace context (include related files automatically)
 - [ ] Custom system prompt editor per conversation
 - [ ] Marketplace for community plugins
-- [ ] Linux build target
+- [ ] Linux build target (AppImage / .deb)
 - [ ] MCP (Model Context Protocol) server integration
 - [ ] RAG over local codebase with vector embeddings
+- [ ] Streaming tool results (progress updates during long-running commands)
 
 ---
 
