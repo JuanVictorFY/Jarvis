@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="
+      default-src 'none';
+      style-src {{CSP_SOURCE}} 'nonce-{{NONCE}}';
+      script-src 'nonce-{{NONCE}}';
+    "
+  />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="{{STYLE_URI}}" />
+  <title>Jarvis</title>
+</head>
+<body>
+
+  <!-- Header -->
+  <div id="header">
+    <h1>⚡ Jarvis</h1>
+    <button id="btn-clear" title="Clear conversation">↺ Clear</button>
+  </div>
+
+  <!-- Context bar: active file + selection + diagnostics -->
+  <div id="context-bar">
+    <span>📄</span>
+    <span class="pill" id="ctx-file">—</span>
+    <span class="pill" id="ctx-lang">—</span>
+    <span class="pill selection" id="ctx-selection" style="display:none">selection</span>
+    <span class="pill error" id="ctx-errors" style="display:none">errors</span>
+  </div>
+
+  <!-- Message thread -->
+  <div id="messages" role="log" aria-live="polite"></div>
+
+  <!-- Input -->
+  <div id="input-area">
+    <div id="input-row">
+      <textarea
+        id="user-input"
+        placeholder="Ask Jarvis… (Shift+Enter for newline)"
+        rows="1"
+        aria-label="Chat input"
+      ></textarea>
+      <button id="btn-send" aria-label="Send">Send ↵</button>
+    </div>
+    <div id="hint">Shift+Enter = newline · Enter = send</div>
+  </div>
+
+  <script nonce="{{NONCE}}">
+    // ── VS Code bridge ──────────────────────────────────────────────────────
+    const vscode = acquireVsCodeApi();
+
+    // ── DOM refs ────────────────────────────────────────────────────────────
+    const messagesEl   = /** @type {HTMLElement} */  (document.getElementById('messages'));
+    const inputEl      = /** @type {HTMLTextAreaElement} */ (document.getElementById('user-input'));
+    const sendBtn      = /** @type {HTMLButtonElement} */ (document.getElementById('btn-send'));
+    const clearBtn     = /** @type {HTMLButtonElement} */ (document.getElementById('btn-clear'));
+    const contextBar   = /** @type {HTMLElement} */ (document.getElementById('context-bar'));
+    const ctxFile      = /** @type {HTMLElement} */ (document.getElementById('ctx-file'));
+    const ctxLang      = /** @type {HTMLElement} */ (document.getElementById('ctx-lang'));
+    const ctxSelection = /** @type {HTMLElement} */ (document.getElementById('ctx-selection'));
+    const ctxErrors    = /** @type {HTMLElement} */ (document.getElementById('ctx-errors'));
+
+    // ── Code registry: stores code by id to avoid data-* size limits ───────
+    /** @type {Map<number, {code: string, lang: string}>} */
+    const codeRegistry = new Map();
+    let codeIdCounter = 0;
+
+    // ── Streaming state ─────────────────────────────────────────────────────
+    let isStreaming = false;
+    /** @type {HTMLElement | null} */
+    let streamingBubble = null;
+    let streamingText = '';
+
+    // ── Auto-resize textarea ────────────────────────────────────────────────
+    inputEl.addEventListener('input', () => {
+      inputEl.style.height = 'auto';
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+    });
+
+    inputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    sendBtn.addEventListener('click', sendMessage);
+    clearBtn.addEventListener('click', () => vscode.postMessage({ type: 'clearHistory' }));
+
+    // ── Send message ────────────────────────────────────────────────────────
+    function sendMessage() {
+      const text = inputEl.value.trim();
+      if (!text || isStreaming) { return; }
+
+      appendMessage('user', text);
+      inputEl.value = '';
+      inputEl.style.height = 'auto';
+
+      setStreaming(true);
+      streamingText = '';
+      streamingBubble = createBubble('assistant');
+      streamingBubble.classList.add('streaming');
+
+      vscode.postMessage({ type: 'sendMessage', text });
+    }
+
+    // ── Delegate code-block button clicks via event delegation ──────────────
+    messagesEl.addEventListener('click', (e) => {
+      const btn = /** @type {HTMLElement | null} */ (e.target instanceof Element ? e.target.closest('[data-action]') : null);
+      if (!btn) { return; }
+
+      const action = btn.dataset.action;
+      const id = parseInt(btn.dataset.id ?? '0', 10);
+      const entry = codeRegistry.get(id);
+      if (!entry) { return; }
+
+      if (action === 'copy') {
+        navigator.clipboard.writeText(entry.code).catch(() => {});
+        const orig = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = orig; }, 1500);
+
+      } else if (action === 'apply') {
+        vscode.postMessage({ type: 'applyCode', code: entry.code, language: entry.lang });
+
+      } else if (action === 'run') {
+        vscode.postMessage({ type: 'runTerminal', command: entry.code });
+      }
+    });
+
+    // ── Extension → Webview messages ────────────────────────────────────────
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+
+      switch (msg.type) {
+
+        case 'assistantChunk':
+          streamingText += msg.text;
+          if (streamingBubble) {
+            streamingBubble.textContent = streamingText;
+            streamingBubble.scrollIntoView({ behavior: 'smooth', block: 'end' });
+          }
+          break;
+
+        case 'assistantDone':
+          if (streamingBubble) {
+            streamingBubble.classList.remove('streaming');
+            streamingBubble.innerHTML = renderMarkdown(streamingText);
+            streamingBubble.scrollIntoView({ behavior: 'smooth', block: 'end' });
+            streamingBubble = null;
+          }
+          streamingText = '';
+          setStreaming(false);
+          inputEl.focus();
+          break;
+
+        case 'assistantError':
+          if (streamingBubble) {
+            streamingBubble.remove();
+            streamingBubble = null;
+          }
+          streamingText = '';
+          setStreaming(false);
+          appendMessage('error', '⚠ ' + msg.error);
+          break;
+
+        case 'contextSnapshot':
+          updateContextBar(msg);
+          break;
+
+        case 'historyCleared':
+          messagesEl.innerHTML = '';
+          codeRegistry.clear();
+          codeIdCounter = 0;
+          break;
+      }
+    });
+
+    // ── Context bar update ───────────────────────────────────────────────────
+    function updateContextBar(msg) {
+      if (!msg.fileName) { return; }
+
+      const name = msg.fileName.replace(/\\/g, '/').split('/').pop() ?? msg.fileName;
+      ctxFile.textContent = name;
+      ctxLang.textContent = msg.language;
+      contextBar.classList.add('visible');
+
+      if (msg.selection && msg.selection.trim()) {
+        const lines = msg.selection.split('\n').length;
+        ctxSelection.textContent = `${lines} line${lines > 1 ? 's' : ''} selected`;
+        ctxSelection.style.display = 'inline';
+      } else {
+        ctxSelection.style.display = 'none';
+      }
+
+      if (msg.diagnostics) {
+        ctxErrors.textContent = '⚠ errors';
+        ctxErrors.title = msg.diagnostics;
+        ctxErrors.style.display = 'inline';
+      } else {
+        ctxErrors.style.display = 'none';
+      }
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+    /** @param {'user'|'assistant'|'error'} role @param {string} text */
+    function appendMessage(role, text) {
+      const el = createBubble(role);
+      el.textContent = text;
+      return el;
+    }
+
+    /** @param {'user'|'assistant'|'error'} role */
+    function createBubble(role) {
+      const el = document.createElement('div');
+      el.className = `message ${role}`;
+      messagesEl.appendChild(el);
+      el.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      return el;
+    }
+
+    /** @param {boolean} value */
+    function setStreaming(value) {
+      isStreaming = value;
+      sendBtn.disabled = value;
+      inputEl.disabled = value;
+    }
+
+    /** @param {string} s */
+    function escapeHtml(s) {
+      return s
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    const SHELL_LANGS = new Set(['bash', 'shell', 'sh', 'zsh', 'powershell', 'ps1', 'cmd', 'bat']);
+
+    /** @param {string} text */
+    function renderMarkdown(text) {
+      // Split on fenced code blocks, keeping delimiters
+      const parts = text.split(/(```[\w-]*\n[\s\S]*?```)/g);
+
+      return parts.map(part => {
+        const m = part.match(/^```([\w-]*)\n([\s\S]*?)```$/);
+        if (m) {
+          const lang = (m[1] ?? '').toLowerCase();
+          const code = (m[2] ?? '').replace(/\n$/, '');
+          const id = ++codeIdCounter;
+          codeRegistry.set(id, { code, lang: lang || 'text' });
+
+          const isShell = SHELL_LANGS.has(lang);
+          const actionBtn = isShell
+            ? `<button class="code-btn btn-run" data-action="run" data-id="${id}">▶ Run</button>`
+            : `<button class="code-btn btn-apply" data-action="apply" data-id="${id}">⬇ Apply</button>`;
+
+          return `<div class="code-block">`
+            + `<div class="code-header">`
+            + `<span class="lang-label">${escapeHtml(lang || 'text')}</span>`
+            + `<div class="code-btns">`
+            + `<button class="code-btn" data-action="copy" data-id="${id}">Copy</button>`
+            + actionBtn
+            + `</div></div>`
+            + `<pre><code>${escapeHtml(code)}</code></pre>`
+            + `</div>`;
+        }
+
+        // Regular text: escape HTML, render inline code and line breaks
+        return escapeHtml(part)
+          .replace(/`([^`\n]+)`/g, (_, c) => `<code class="inline">${c}</code>`)
+          .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+          .replace(/\n/g, '<br>');
+      }).join('');
+    }
+
+    // ── Request initial context ──────────────────────────────────────────────
+    vscode.postMessage({ type: 'requestContext' });
+    inputEl.focus();
+  </script>
+</body>
+</html>

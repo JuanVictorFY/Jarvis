@@ -1,0 +1,87 @@
+{
+  "name": "jarvis",
+  "displayName": "Jarvis",
+  "description": "Autonomous AI coding agent powered by Claude",
+  "version": "0.1.0",
+  "publisher": "JuanVictorFY",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["AI", "Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "jarvis-sidebar",
+          "title": "Jarvis",
+          "icon": "$(robot)"
+        }
+      ]
+    },
+    "views": {
+      "jarvis-sidebar": [
+        {
+          "type": "webview",
+          "id": "jarvis.chatView",
+          "name": "Chat",
+          "visibility": "visible"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "jarvis.openChat",
+        "title": "Jarvis: Open Chat"
+      },
+      {
+        "command": "jarvis.clearHistory",
+        "title": "Jarvis: Clear Conversation History"
+      }
+    ],
+    "configuration": {
+      "title": "Jarvis",
+      "properties": {
+        "jarvis.anthropicApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Your Anthropic API key for Claude",
+          "scope": "application"
+        },
+        "jarvis.model": {
+          "type": "string",
+          "default": "claude-sonnet-4-6",
+          "enum": [
+            "claude-sonnet-4-6",
+            "claude-opus-4-8",
+            "claude-haiku-4-5-20251001"
+          ],
+          "description": "Claude model to use"
+        },
+        "jarvis.maxTokens": {
+          "type": "number",
+          "default": 8192,
+          "description": "Maximum tokens per response"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.36.3"
+  }
+}
