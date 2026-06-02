@@ -36,3 +36,4 @@ export class PluginManager {
   list(): Plugin[] { return [...this.plugins.values()]; }
   isActive(id: string): boolean { return this.active.has(id); }
 }
+// patch 1
