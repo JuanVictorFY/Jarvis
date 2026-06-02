@@ -11,3 +11,4 @@ window.addEventListener('unhandledrejection', (event) => {
   errorToast.show(event.reason?.message || 'Promise rejected');
   event.preventDefault();
 });
+// stable
