@@ -21,3 +21,4 @@ export async function fileToImageData(file: File): Promise<ImageData> {
 // multimodal patch 3
 // multimodal patch 4
 // multimodal patch 5
+// multimodal patch 6
