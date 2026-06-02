@@ -14,3 +14,4 @@ class ErrorBoundary {
   }
 }
 module.exports = ErrorBoundary;
+// stable
