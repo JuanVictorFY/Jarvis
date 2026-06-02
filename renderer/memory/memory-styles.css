@@ -1,0 +1,6 @@
+.memory-panel { padding: 12px; }
+.memory-list { list-style: none; padding: 0; margin: 0; }
+.memory-item { padding: 4px 8px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.mem-result { padding: 4px 8px; cursor: pointer; }
+.mem-result:hover { background: var(--hover); }
+.mem-empty { color: var(--muted); font-style: italic; padding: 8px; }
