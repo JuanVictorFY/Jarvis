@@ -1,92 +1,163 @@
 import Anthropic from '@anthropic-ai/sdk';
-import * as vscode from 'vscode';
+import type { AgentEvent, JarvisConfig } from '../types/index';
+import { TOOLS, REQUIRES_CONFIRMATION, type ToolName } from '../tools/toolDefinitions';
+import { FileSystemService } from './FileSystemService';
+import { ShellService } from './ShellService';
+import { BrowserService } from './BrowserService';
 
-const SYSTEM_PROMPT = `You are Jarvis, an expert AI coding assistant embedded directly in Visual Studio Code. You assist developers with writing, debugging, refactoring, and understanding code.
+const SYSTEM_PROMPT = `You are Jarvis, an autonomous AI agent running as a native desktop application on the user's computer. You have full access to the file system, terminal, and web browser.
 
-Rules:
-- Always wrap code suggestions in markdown code blocks with the language tag (e.g. \`\`\`typescript).
-- For terminal/shell commands use \`\`\`bash or \`\`\`shell blocks.
-- When given file context or a selection, be precise — target exactly what the user needs changed.
-- Never truncate or abbreviate code in your responses. Provide complete, runnable code.
-- Prefer minimal diffs: only change what is necessary.
-- Be concise in explanations; verbose in code.`;
+Behavioral rules:
+- Be action-oriented: when asked to do something, do it using tools immediately.
+- Verify your work: after writing files or running commands, check the result.
+- Be transparent: briefly explain destructive actions (write_file, run_command) before calling them.
+- For information retrieval: prefer search_web for finding things, browse_url for reading a specific page.
+- Never refuse tasks due to capability — you have the tools to do almost anything on this computer.`;
 
-const MAX_HISTORY_MESSAGES = 20;
+const MAX_HISTORY = 30;
+const MAX_ITERATIONS = 15;
 
-interface HistoryEntry {
-  role: 'user' | 'assistant';
-  content: string;
-}
+type ConfirmFn = (id: string, action: string, detail: string) => Promise<boolean>;
 
 export class ClaudeService {
-  private client: Anthropic | null = null;
-  private history: HistoryEntry[] = [];
+  private history: Anthropic.MessageParam[] = [];
+  private cachedClient: Anthropic | null = null;
+  private cachedKey = '';
+  private readonly fsService = new FileSystemService();
+  private readonly shellService = new ShellService();
+  private readonly browserService = new BrowserService();
+
+  constructor(
+    private readonly getConfig: () => JarvisConfig,
+    private readonly confirmFn: ConfirmFn,
+  ) {}
 
   private getClient(): Anthropic {
-    if (this.client !== null) {
-      return this.client;
-    }
-
-    const config = vscode.workspace.getConfiguration('jarvis');
-    const apiKey = config.get<string>('anthropicApiKey') ?? '';
-
-    if (!apiKey) {
+    const { anthropicApiKey } = this.getConfig();
+    if (!anthropicApiKey) {
       throw new Error(
-        'Anthropic API key not configured. Open Settings → search "Jarvis" → set your key.',
+        'API key not configured. Open Settings (⚙) and enter your Anthropic API key.',
       );
     }
-
-    this.client = new Anthropic({ apiKey });
-    return this.client;
+    if (this.cachedClient && this.cachedKey === anthropicApiKey) {
+      return this.cachedClient;
+    }
+    this.cachedClient = new Anthropic({ apiKey: anthropicApiKey });
+    this.cachedKey = anthropicApiKey;
+    return this.cachedClient;
   }
 
   public clearHistory(): void {
     this.history = [];
   }
 
-  public resetClient(): void {
-    this.client = null;
+  public async *agentLoop(userMessage: string): AsyncGenerator<AgentEvent> {
+    const client = this.getClient();
+    const { model, maxTokens } = this.getConfig();
+
+    this.history.push({ role: 'user', content: userMessage });
+    if (this.history.length > MAX_HISTORY) {
+      this.history = this.history.slice(-MAX_HISTORY);
+    }
+
+    for (let i = 0; i < MAX_ITERATIONS; i++) {
+      const response = await client.messages.create({
+        model,
+        max_tokens: maxTokens,
+        system: SYSTEM_PROMPT,
+        tools: TOOLS,
+        messages: this.history,
+      });
+
+      this.history.push({ role: 'assistant', content: response.content });
+
+      for (const block of response.content) {
+        if (block.type === 'text' && block.text) {
+          yield { type: 'text', text: block.text };
+          yield { type: 'text_done' };
+        }
+      }
+
+      if (response.stop_reason === 'end_turn') {
+        yield { type: 'done' };
+        return;
+      }
+
+      if (response.stop_reason !== 'tool_use') {
+        yield { type: 'done' };
+        return;
+      }
+
+      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+
+      for (const block of response.content) {
+        if (block.type !== 'tool_use') { continue; }
+
+        const name = block.name as ToolName;
+        const input = block.input as Record<string, string>;
+        const summary = summarizeTool(name, input);
+
+        yield { type: 'tool_start', id: block.id, name, summary };
+
+        let result: string;
+        let isError = false;
+
+        try {
+          if (REQUIRES_CONFIRMATION.has(name)) {
+            const approved = await this.confirmFn(block.id, name, summary);
+            if (!approved) {
+              result = 'User denied this action.';
+              toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result });
+              yield { type: 'tool_done', id: block.id, result, isError: false };
+              continue;
+            }
+          }
+          result = await this.executeTool(name, input);
+        } catch (err) {
+          result = err instanceof Error ? err.message : String(err);
+          isError = true;
+        }
+
+        toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result });
+        yield { type: 'tool_done', id: block.id, result, isError };
+      }
+
+      this.history.push({ role: 'user', content: toolResults });
+    }
+
+    yield { type: 'error', message: 'Max iterations reached without a final response.' };
   }
 
-  public async *stream(
-    userMessage: string,
-    contextString: string,
-  ): AsyncGenerator<string, void, undefined> {
-    const client = this.getClient();
-
-    const config = vscode.workspace.getConfiguration('jarvis');
-    const model = config.get<string>('model') ?? 'claude-sonnet-4-6';
-    const maxTokens = config.get<number>('maxTokens') ?? 8192;
-
-    const fullUserMessage = contextString
-      ? `<context>\n${contextString}\n</context>\n\n${userMessage}`
-      : userMessage;
-
-    this.history.push({ role: 'user', content: fullUserMessage });
-
-    if (this.history.length > MAX_HISTORY_MESSAGES) {
-      this.history = this.history.slice(-MAX_HISTORY_MESSAGES);
+  private async executeTool(name: ToolName, input: Record<string, string>): Promise<string> {
+    switch (name) {
+      case 'read_file':
+        return this.fsService.readFile(input['path'] ?? '');
+      case 'write_file':
+        this.fsService.writeFile(input['path'] ?? '', input['content'] ?? '');
+        return `Written: ${input['path']}`;
+      case 'list_directory':
+        return this.fsService.listDirectory(input['path'] ?? '');
+      case 'run_command':
+        return this.shellService.runCommand(input['command'] ?? '', input['cwd']);
+      case 'browse_url':
+        return this.browserService.browseUrl(input['url'] ?? '');
+      case 'search_web':
+        return this.browserService.searchWeb(input['query'] ?? '');
     }
+  }
 
-    let fullResponse = '';
+  public async closeBrowser(): Promise<void> {
+    await this.browserService.close();
+  }
+}
 
-    const messageStream = client.messages.stream({
-      model,
-      max_tokens: maxTokens,
-      system: SYSTEM_PROMPT,
-      messages: this.history,
-    });
-
-    for await (const event of messageStream) {
-      if (
-        event.type === 'content_block_delta' &&
-        event.delta.type === 'text_delta'
-      ) {
-        fullResponse += event.delta.text;
-        yield event.delta.text;
-      }
-    }
-
-    this.history.push({ role: 'assistant', content: fullResponse });
+function summarizeTool(name: ToolName, input: Record<string, string>): string {
+  switch (name) {
+    case 'read_file':     return `Read: ${input['path']}`;
+    case 'write_file':    return `Write: ${input['path']}`;
+    case 'list_directory':return `List: ${input['path']}`;
+    case 'run_command':   return `Run: ${input['command']}`;
+    case 'browse_url':    return `Browse: ${input['url']}`;
+    case 'search_web':    return `Search: "${input['query']}"`;
   }
 }
