@@ -37,3 +37,4 @@ export class ConversationHistory {
   delete(id: string): boolean { return this.conversations.delete(id); }
 }
 // patch 1
+// patch 2
