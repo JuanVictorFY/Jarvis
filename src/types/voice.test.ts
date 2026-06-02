@@ -13,6 +13,8 @@ const _transcript: VoiceTranscript = {
   timestamp: new Date(),
 };
 
+void _state; void _mode; void _transcript;
+
 const _langs = SUPPORTED_LANGUAGES;
 
 // Verify all language codes are valid BCP-47 tags

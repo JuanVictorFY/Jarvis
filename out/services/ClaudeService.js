@@ -9,6 +9,7 @@ const toolDefinitions_1 = require("../tools/toolDefinitions");
 const FileSystemService_1 = require("./FileSystemService");
 const ShellService_1 = require("./ShellService");
 const BrowserService_1 = require("./BrowserService");
+const tokenUtils_1 = require("../utils/tokenUtils");
 const SYSTEM_PROMPT = `You are Jarvis, an autonomous AI agent running as a native desktop application on the user's computer. You have full access to the file system, terminal, and web browser.
 
 Behavioral rules:
@@ -17,8 +18,13 @@ Behavioral rules:
 - Be transparent: briefly explain destructive actions (write_file, run_command) before calling them.
 - For information retrieval: prefer search_web for finding things, browse_url for reading a specific page.
 - Never refuse tasks due to capability — you have the tools to do almost anything on this computer.`;
-const MAX_HISTORY = 30;
+const SYSTEM_BLOCK = {
+    type: 'text',
+    text: SYSTEM_PROMPT,
+    cache_control: { type: 'ephemeral' },
+};
 const MAX_ITERATIONS = 15;
+const HISTORY_TOKEN_BUDGET = 80_000;
 class ClaudeService {
     getConfig;
     confirmFn;
@@ -47,41 +53,81 @@ class ClaudeService {
     clearHistory() {
         this.history = [];
     }
+    estimateHistoryTokens() {
+        return this.history.reduce((sum, msg) => {
+            if (typeof msg.content === 'string') {
+                return sum + (0, tokenUtils_1.estimateTokens)(msg.content);
+            }
+            if (Array.isArray(msg.content)) {
+                return sum + msg.content.reduce((s, block) => {
+                    if ('text' in block && typeof block.text === 'string')
+                        return s + (0, tokenUtils_1.estimateTokens)(block.text);
+                    if ('content' in block && typeof block.content === 'string')
+                        return s + (0, tokenUtils_1.estimateTokens)(block.content);
+                    return s + 50;
+                }, 0);
+            }
+            return sum;
+        }, 0);
+    }
+    trimHistory() {
+        while (this.history.length > 2 && this.estimateHistoryTokens() > HISTORY_TOKEN_BUDGET) {
+            this.history.splice(0, 2);
+        }
+    }
+    validateToolInput(name, input) {
+        const tool = toolDefinitions_1.TOOLS.find(t => t.name === name);
+        if (!tool)
+            return;
+        const required = (tool.input_schema.required ?? []);
+        for (const field of required) {
+            if (!(field in input) || input[field] === undefined || input[field] === '') {
+                throw new Error(`Tool "${name}": missing required field "${field}"`);
+            }
+        }
+    }
     async *agentLoop(userMessage) {
         const client = this.getClient();
         const { model, maxTokens } = this.getConfig();
         this.history.push({ role: 'user', content: userMessage });
-        if (this.history.length > MAX_HISTORY) {
-            this.history = this.history.slice(-MAX_HISTORY);
-        }
+        this.trimHistory();
+        let totalInputTokens = 0;
+        let totalOutputTokens = 0;
         for (let i = 0; i < MAX_ITERATIONS; i++) {
-            const response = await client.messages.create({
+            const stream = client.messages.stream({
                 model,
                 max_tokens: maxTokens,
-                system: SYSTEM_PROMPT,
-                tools: toolDefinitions_1.TOOLS,
+                system: [SYSTEM_BLOCK],
+                tools: toolDefinitions_1.TOOLS_WITH_CACHE,
                 messages: this.history,
             });
-            this.history.push({ role: 'assistant', content: response.content });
-            for (const block of response.content) {
-                if (block.type === 'text' && block.text) {
-                    yield { type: 'text', text: block.text };
-                    yield { type: 'text_done' };
+            for await (const chunk of stream) {
+                if (chunk.type === 'content_block_delta' &&
+                    chunk.delta.type === 'text_delta' &&
+                    chunk.delta.text) {
+                    yield { type: 'text', text: chunk.delta.text };
                 }
             }
+            const response = await stream.finalMessage();
+            totalInputTokens += response.usage.input_tokens;
+            totalOutputTokens += response.usage.output_tokens;
+            this.history.push({ role: 'assistant', content: response.content });
+            const hasText = response.content.some(b => b.type === 'text' && b.text);
+            if (hasText) {
+                yield { type: 'text_done' };
+            }
             if (response.stop_reason === 'end_turn') {
-                yield { type: 'done' };
+                yield { type: 'done', inputTokens: totalInputTokens, outputTokens: totalOutputTokens };
                 return;
             }
             if (response.stop_reason !== 'tool_use') {
-                yield { type: 'done' };
+                yield { type: 'done', inputTokens: totalInputTokens, outputTokens: totalOutputTokens };
                 return;
             }
             const toolResults = [];
             for (const block of response.content) {
-                if (block.type !== 'tool_use') {
+                if (block.type !== 'tool_use')
                     continue;
-                }
                 const name = block.name;
                 const input = block.input;
                 const summary = summarizeTool(name, input);
@@ -89,6 +135,7 @@ class ClaudeService {
                 let result;
                 let isError = false;
                 try {
+                    this.validateToolInput(name, input);
                     if (toolDefinitions_1.REQUIRES_CONFIRMATION.has(name)) {
                         const approved = await this.confirmFn(block.id, name, summary);
                         if (!approved) {
@@ -108,8 +155,12 @@ class ClaudeService {
                 yield { type: 'tool_done', id: block.id, result, isError };
             }
             this.history.push({ role: 'user', content: toolResults });
+            this.trimHistory();
         }
-        yield { type: 'error', message: 'Max iterations reached without a final response.' };
+        yield {
+            type: 'error',
+            message: `Agent reached the maximum of ${MAX_ITERATIONS} iterations without completing.`,
+        };
     }
     async executeTool(name, input) {
         switch (name) {
@@ -135,12 +186,12 @@ class ClaudeService {
 exports.ClaudeService = ClaudeService;
 function summarizeTool(name, input) {
     switch (name) {
-        case 'read_file': return `Read: ${input['path']}`;
-        case 'write_file': return `Write: ${input['path']}`;
-        case 'list_directory': return `List: ${input['path']}`;
-        case 'run_command': return `Run: ${input['command']}`;
-        case 'browse_url': return `Browse: ${input['url']}`;
-        case 'search_web': return `Search: "${input['query']}"`;
+        case 'read_file': return `Read: ${String(input['path'] ?? '')}`;
+        case 'write_file': return `Write: ${String(input['path'] ?? '')}`;
+        case 'list_directory': return `List: ${String(input['path'] ?? '')}`;
+        case 'run_command': return `Run: ${String(input['command'] ?? '')}`;
+        case 'browse_url': return `Browse: ${String(input['url'] ?? '')}`;
+        case 'search_web': return `Search: "${String(input['query'] ?? '')}"`;
     }
 }
 //# sourceMappingURL=ClaudeService.js.map

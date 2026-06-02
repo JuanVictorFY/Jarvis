@@ -16,4 +16,6 @@ export interface JarvisConfig {
   ollamaBaseUrl: string;
   defaultProvider: string;
   theme: string;
+  enableVoice?: boolean;
+  language?: string;
 }

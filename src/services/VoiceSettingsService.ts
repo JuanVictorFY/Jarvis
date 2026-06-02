@@ -10,7 +10,7 @@ export class VoiceSettingsService {
   }
 
   private loadFromAppConfig(): void {
-    const appConfig = this.configService.getConfig();
+    const appConfig = this.configService.get();
     this.config = {
       ...DEFAULT_VOICE_CONFIG,
       enabled: appConfig.enableVoice ?? false,
@@ -25,10 +25,10 @@ export class VoiceSettingsService {
   update(partial: Partial<VoiceConfig>): void {
     this.config = { ...this.config, ...partial };
     if ('enabled' in partial) {
-      this.configService.updateConfig({ enableVoice: partial.enabled });
+      this.configService.update({ enableVoice: partial.enabled });
     }
     if ('language' in partial && partial.language) {
-      this.configService.updateConfig({ language: partial.language });
+      this.configService.update({ language: partial.language });
     }
   }
 

@@ -38,11 +38,23 @@ const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
 const ClaudeService_1 = require("./services/ClaudeService");
 const ConfigService_1 = require("./services/ConfigService");
+const WindowStateService_1 = require("./services/WindowStateService");
+const MemoryStore_1 = require("./services/memory/MemoryStore");
+const MemoryPersistence_1 = require("./services/memory/MemoryPersistence");
+const ConversationHistory_1 = require("./services/history/ConversationHistory");
+const NotificationService_1 = require("./services/notifications/NotificationService");
+const logger_1 = require("./utils/dev/logger");
+const log = (0, logger_1.createLogger)('main');
 // ── State ─────────────────────────────────────────────────────────────────────
 let mainWindow = null;
 let tray = null;
 const pendingConfirms = new Map();
 const configService = new ConfigService_1.ConfigService();
+const windowStateService = new WindowStateService_1.WindowStateService();
+const memoryStore = new MemoryStore_1.MemoryStore();
+const memoryPersistence = new MemoryPersistence_1.MemoryPersistence(path.join(electron_1.app.getPath('userData'), 'memory.json'));
+const conversationHistory = new ConversationHistory_1.ConversationHistory();
+const notificationService = new NotificationService_1.NotificationService();
 const claudeService = new ClaudeService_1.ClaudeService(() => configService.get(), (id, action, detail) => {
     mainWindow?.webContents.send('agent:event', {
         type: 'confirm', id, action, detail,
@@ -54,9 +66,12 @@ const claudeService = new ClaudeService_1.ClaudeService(() => configService.get(
 // ── Window ────────────────────────────────────────────────────────────────────
 function createWindow() {
     const iconPath = path.join(__dirname, '../assets/icon.png');
+    const winState = windowStateService.get();
     mainWindow = new electron_1.BrowserWindow({
-        width: 460,
-        height: 800,
+        width: winState.width,
+        height: winState.height,
+        x: winState.x,
+        y: winState.y,
         minWidth: 380,
         minHeight: 500,
         title: 'Jarvis',
@@ -70,9 +85,27 @@ function createWindow() {
         },
     });
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
-    mainWindow.once('ready-to-show', () => mainWindow?.show());
+    mainWindow.once('ready-to-show', () => {
+        mainWindow?.show();
+        if (winState.isMaximized)
+            mainWindow?.maximize();
+        log('info', 'Window ready and visible');
+    });
+    const saveState = () => {
+        if (!mainWindow)
+            return;
+        windowStateService.save({
+            ...mainWindow.getBounds(),
+            isMaximized: mainWindow.isMaximized(),
+        });
+    };
+    mainWindow.on('resize', saveState);
+    mainWindow.on('move', saveState);
+    mainWindow.on('maximize', saveState);
+    mainWindow.on('unmaximize', saveState);
     mainWindow.on('close', (e) => {
         e.preventDefault();
+        saveState();
         mainWindow?.hide();
     });
 }
@@ -109,7 +142,15 @@ function createTray() {
     });
 }
 // ── App lifecycle ─────────────────────────────────────────────────────────────
-electron_1.app.whenReady().then(() => {
+electron_1.app.whenReady().then(async () => {
+    try {
+        const entries = await memoryPersistence.load();
+        entries.forEach(e => memoryStore.set(e.key, e.value));
+        log('info', `Memory restored: ${entries.length} entries`);
+    }
+    catch (err) {
+        log('warn', 'Could not restore memory', err);
+    }
     createWindow();
     createTray();
     electron_1.globalShortcut.register('CommandOrControl+Shift+J', () => {
@@ -121,29 +162,50 @@ electron_1.app.whenReady().then(() => {
             mainWindow?.focus();
         }
     });
+    log('info', 'Jarvis started');
 });
-electron_1.app.on('will-quit', () => {
+electron_1.app.on('will-quit', async () => {
     electron_1.globalShortcut.unregisterAll();
-    void claudeService.closeBrowser();
+    try {
+        await memoryPersistence.save(memoryStore.all());
+        log('info', 'Memory persisted on exit');
+    }
+    catch (err) {
+        log('warn', 'Could not persist memory on exit', err);
+    }
+    await claudeService.closeBrowser();
 });
 electron_1.app.on('window-all-closed', () => {
-    // Keep running in tray on all platforms
+    // Stay alive in system tray on all platforms
 });
-// ── IPC ───────────────────────────────────────────────────────────────────────
+// ── Core agent IPC ────────────────────────────────────────────────────────────
+const IPC_TIMEOUT_MS = 5 * 60 * 1000;
 electron_1.ipcMain.handle('send-message', async (event, text) => {
     const sender = event.sender;
+    const timer = setTimeout(() => {
+        if (!sender.isDestroyed()) {
+            log('warn', 'Agent loop timed out');
+            sender.send('agent:event', {
+                type: 'error',
+                message: 'Agent timed out after 5 minutes. Please try again.',
+            });
+        }
+    }, IPC_TIMEOUT_MS);
     try {
         for await (const ev of claudeService.agentLoop(text)) {
-            if (!sender.isDestroyed()) {
+            if (!sender.isDestroyed())
                 sender.send('agent:event', ev);
-            }
         }
     }
     catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        log('error', 'agentLoop error', message);
         if (!sender.isDestroyed()) {
             sender.send('agent:event', { type: 'error', message });
         }
+    }
+    finally {
+        clearTimeout(timer);
     }
 });
 electron_1.ipcMain.handle('confirm-action', (_event, id, approved) => {
@@ -152,10 +214,12 @@ electron_1.ipcMain.handle('confirm-action', (_event, id, approved) => {
 });
 electron_1.ipcMain.handle('clear-history', () => {
     claudeService.clearHistory();
+    log('info', 'Conversation history cleared');
 });
 electron_1.ipcMain.handle('get-config', () => configService.get());
 electron_1.ipcMain.handle('save-config', (_event, partial) => {
     configService.update(partial);
+    log('info', 'Config saved:', Object.keys(partial).join(', '));
 });
 electron_1.ipcMain.handle('open-external', (_event, url) => {
     void electron_1.shell.openExternal(url);
@@ -164,5 +228,34 @@ electron_1.ipcMain.handle('open-settings', () => {
     mainWindow?.webContents.send('open-settings', configService.get());
     mainWindow?.show();
     mainWindow?.focus();
+});
+// ── Memory IPC ────────────────────────────────────────────────────────────────
+electron_1.ipcMain.handle('memory:set', (_event, key, value) => {
+    const entry = memoryStore.set(key, value);
+    void memoryPersistence.save(memoryStore.all());
+    return entry;
+});
+electron_1.ipcMain.handle('memory:get', (_event, key) => memoryStore.get(key));
+electron_1.ipcMain.handle('memory:delete', (_event, key) => {
+    const ok = memoryStore.delete(key);
+    void memoryPersistence.save(memoryStore.all());
+    return ok;
+});
+electron_1.ipcMain.handle('memory:all', () => memoryStore.all());
+// ── Conversation history IPC ──────────────────────────────────────────────────
+electron_1.ipcMain.handle('history:create', (_event, title) => conversationHistory.create(title));
+electron_1.ipcMain.handle('history:all', () => conversationHistory.getAll());
+electron_1.ipcMain.handle('history:delete', (_event, id) => conversationHistory.delete(id));
+electron_1.ipcMain.handle('history:add-message', (_event, conversationId, msg) => conversationHistory.addMessage(conversationId, {
+    ...msg,
+    timestamp: Date.now(),
+}));
+// ── Notifications IPC ─────────────────────────────────────────────────────────
+electron_1.ipcMain.handle('notifications:send', (_event, title, body, level) => notificationService.send(title, body, level ?? 'info'));
+electron_1.ipcMain.handle('notifications:all', () => notificationService.getAll());
+electron_1.ipcMain.handle('notifications:unread', () => notificationService.getUnread());
+electron_1.ipcMain.handle('notifications:mark-read', (_event, id) => notificationService.markRead(id));
+notificationService.onNotification((n) => {
+    mainWindow?.webContents.send('notification:new', n);
 });
 //# sourceMappingURL=main.js.map

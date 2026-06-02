@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.REQUIRES_CONFIRMATION = exports.TOOLS = void 0;
+exports.TOOLS_WITH_CACHE = exports.REQUIRES_CONFIRMATION = exports.TOOLS = void 0;
 exports.TOOLS = [
     {
         name: 'read_file',
@@ -72,4 +72,8 @@ exports.TOOLS = [
     },
 ];
 exports.REQUIRES_CONFIRMATION = new Set(['run_command', 'write_file']);
+// Same tools with cache_control on the last entry so Anthropic caches the full tool block.
+exports.TOOLS_WITH_CACHE = exports.TOOLS.map((tool, i) => i === exports.TOOLS.length - 1
+    ? { ...tool, cache_control: { type: 'ephemeral' } }
+    : tool);
 //# sourceMappingURL=toolDefinitions.js.map

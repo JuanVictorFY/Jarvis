@@ -14,7 +14,7 @@ export class ResponseCache {
   private hits = 0;
   private misses = 0;
 
-  constructor(ttlMs = 300_000, private readonly maxEntries = 100) {
+  constructor(ttlMs = 300_000) {
     this.cache = new TTLCache<string, CachedResponse>(ttlMs);
   }
 

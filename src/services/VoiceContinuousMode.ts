@@ -24,7 +24,7 @@ export class VoiceContinuousMode {
   private onUtterance: ((text: string) => void) | null = null;
 
   constructor(
-    private readonly voiceService: VoiceService,
+    _voiceService: VoiceService,
     opts: Partial<ContinuousModeOptions> = {}
   ) {
     this.opts = { ...DEFAULTS, ...opts };
