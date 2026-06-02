@@ -7,6 +7,11 @@ const DEFAULTS: JarvisConfig = {
   anthropicApiKey: '',
   model: 'claude-sonnet-4-6',
   maxTokens: 8192,
+  openaiApiKey: '',
+  geminiApiKey: '',
+  ollamaBaseUrl: 'http://localhost:11434',
+  defaultProvider: 'anthropic',
+  theme: 'dark',
 };
 
 export class ConfigService {

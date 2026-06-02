@@ -4,11 +4,16 @@ export type AgentEvent =
   | { type: 'tool_start'; id: string; name: string; summary: string }
   | { type: 'tool_done'; id: string; result: string; isError: boolean }
   | { type: 'confirm'; id: string; action: string; detail: string }
-  | { type: 'done' }
+  | { type: 'done'; inputTokens: number; outputTokens: number }
   | { type: 'error'; message: string };
 
 export interface JarvisConfig {
   anthropicApiKey: string;
   model: string;
   maxTokens: number;
+  openaiApiKey: string;
+  geminiApiKey: string;
+  ollamaBaseUrl: string;
+  defaultProvider: string;
+  theme: string;
 }

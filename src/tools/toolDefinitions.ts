@@ -80,3 +80,10 @@ export type ToolName =
   | 'search_web';
 
 export const REQUIRES_CONFIRMATION = new Set<ToolName>(['run_command', 'write_file']);
+
+// Same tools with cache_control on the last entry so Anthropic caches the full tool block.
+export const TOOLS_WITH_CACHE: Anthropic.Tool[] = TOOLS.map((tool, i) =>
+  i === TOOLS.length - 1
+    ? { ...tool, cache_control: { type: 'ephemeral' as const } }
+    : tool,
+);
