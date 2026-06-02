@@ -14,3 +14,4 @@ export class ProviderRegistry {
   getActive(): AIProvider | null { return this.activeId ? (this.providers.get(this.activeId) ?? null) : null; }
   list(): AIProvider[] { return [...this.providers.values()]; }
 }
+// patch 1
