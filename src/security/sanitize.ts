@@ -10,3 +10,4 @@ export function sanitizeHTML(input: string): string {
 export function sanitizePath(input: string): string {
   return input.replace(/\.\.\//g, '').replace(/\\/g, '/');
 }
+// security patch 1
