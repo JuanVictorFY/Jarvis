@@ -15,3 +15,4 @@ export class ProviderRegistry {
   list(): AIProvider[] { return [...this.providers.values()]; }
 }
 // patch 1
+// patch 2
