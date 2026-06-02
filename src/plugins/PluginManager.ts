@@ -46,3 +46,4 @@ export class PluginManager {
 // patch 8
 // patch 9
 // patch 10
+// patch 11
