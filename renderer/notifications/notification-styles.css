@@ -1,0 +1,7 @@
+.notif { display: flex; flex-direction: column; padding: 10px 12px; border-left: 3px solid; margin-bottom: 4px; border-radius: 4px; background: var(--surface); }
+.notif--info    { border-color: #63b3ed; }
+.notif--success { border-color: #68d391; }
+.notif--warning { border-color: #f6ad55; }
+.notif--error   { border-color: #fc8181; }
+.notif-title { font-weight: 600; font-size: 13px; }
+.notif-body  { font-size: 12px; color: var(--muted); margin-top: 2px; }
