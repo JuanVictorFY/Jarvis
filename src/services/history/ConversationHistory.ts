@@ -36,3 +36,4 @@ export class ConversationHistory {
   getAll(): Conversation[] { return [...this.conversations.values()].sort((a, b) => b.updatedAt - a.updatedAt); }
   delete(id: string): boolean { return this.conversations.delete(id); }
 }
+// patch 1
