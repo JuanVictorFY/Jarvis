@@ -1,6 +1,6 @@
-import Anthropic from '@anthropic-ai/sdk';
+import http from 'http';
 import type { AgentEvent, JarvisConfig } from '../types/index';
-import { TOOLS, TOOLS_WITH_CACHE, REQUIRES_CONFIRMATION, type ToolName } from '../tools/toolDefinitions';
+import { TOOLS, REQUIRES_CONFIRMATION, type ToolName } from '../tools/toolDefinitions';
 import { FileSystemService } from './FileSystemService';
 import { ShellService } from './ShellService';
 import { BrowserService } from './BrowserService';
@@ -15,21 +15,44 @@ Behavioral rules:
 - For information retrieval: prefer search_web for finding things, browse_url for reading a specific page.
 - Never refuse tasks due to capability — you have the tools to do almost anything on this computer.`;
 
-const SYSTEM_BLOCK: Anthropic.TextBlockParam = {
-  type: 'text',
-  text: SYSTEM_PROMPT,
-  cache_control: { type: 'ephemeral' },
-};
-
 const MAX_ITERATIONS = 15;
 const HISTORY_TOKEN_BUDGET = 80_000;
 
+interface OllamaMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string;
+  tool_calls?: OllamaToolCall[];
+}
+
+interface OllamaToolCall {
+  function: { name: string; arguments: Record<string, unknown> };
+}
+
+interface OllamaChunk {
+  message?: {
+    role?: string;
+    content?: string;
+    tool_calls?: OllamaToolCall[];
+  };
+  done: boolean;
+  error?: string;
+  prompt_eval_count?: number;
+  eval_count?: number;
+}
+
 type ConfirmFn = (id: string, action: string, detail: string) => Promise<boolean>;
 
+function parseOllamaUrl(baseUrl: string): { host: string; port: number } {
+  try {
+    const u = new URL(baseUrl ?? 'http://localhost:11434');
+    return { host: u.hostname, port: parseInt(u.port || '11434', 10) };
+  } catch {
+    return { host: 'localhost', port: 11434 };
+  }
+}
+
 export class ClaudeService {
-  private history: Anthropic.MessageParam[] = [];
-  private cachedClient: Anthropic | null = null;
-  private cachedKey = '';
+  private history: OllamaMessage[] = [];
   private readonly fsService = new FileSystemService();
   private readonly shellService = new ShellService();
   private readonly browserService = new BrowserService();
@@ -39,39 +62,12 @@ export class ClaudeService {
     private readonly confirmFn: ConfirmFn,
   ) {}
 
-  private getClient(): Anthropic {
-    const { anthropicApiKey } = this.getConfig();
-    if (!anthropicApiKey) {
-      throw new Error(
-        'API key not configured. Open Settings (⚙) and enter your Anthropic API key.',
-      );
-    }
-    if (this.cachedClient && this.cachedKey === anthropicApiKey) {
-      return this.cachedClient;
-    }
-    this.cachedClient = new Anthropic({ apiKey: anthropicApiKey });
-    this.cachedKey = anthropicApiKey;
-    return this.cachedClient;
-  }
-
   public clearHistory(): void {
     this.history = [];
   }
 
   private estimateHistoryTokens(): number {
-    return this.history.reduce((sum, msg) => {
-      if (typeof msg.content === 'string') {
-        return sum + estimateTokens(msg.content);
-      }
-      if (Array.isArray(msg.content)) {
-        return sum + msg.content.reduce((s, block) => {
-          if ('text' in block && typeof block.text === 'string') return s + estimateTokens(block.text);
-          if ('content' in block && typeof block.content === 'string') return s + estimateTokens(block.content as string);
-          return s + 50;
-        }, 0);
-      }
-      return sum;
-    }, 0);
+    return this.history.reduce((sum, msg) => sum + estimateTokens(msg.content), 0);
   }
 
   private trimHistory(): void {
@@ -80,11 +76,88 @@ export class ClaudeService {
     }
   }
 
+  private streamOllama(messages: OllamaMessage[]): AsyncIterable<OllamaChunk> {
+    const { model, maxTokens, ollamaBaseUrl } = this.getConfig();
+    const { host, port } = parseOllamaUrl(ollamaBaseUrl ?? 'http://localhost:11434');
+
+    const body = JSON.stringify({
+      model: model || 'llama3.2',
+      messages,
+      tools: TOOLS,
+      stream: true,
+      options: { num_predict: maxTokens || 8192 },
+    });
+
+    const queue: Array<OllamaChunk | Error | 'end'> = [];
+    let notify: (() => void) | null = null;
+
+    const push = (item: OllamaChunk | Error | 'end'): void => {
+      queue.push(item);
+      const r = notify;
+      notify = null;
+      r?.();
+    };
+
+    const req = http.request(
+      {
+        hostname: host,
+        port,
+        path: '/api/chat',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      },
+      (res) => {
+        let buf = '';
+        res.on('data', (chunk: Buffer) => {
+          buf += chunk.toString();
+          const lines = buf.split('\n');
+          buf = lines.pop() ?? '';
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const parsed = JSON.parse(line) as OllamaChunk;
+              push(parsed);
+            } catch { /* skip malformed */ }
+          }
+        });
+        res.on('end', () => push('end'));
+        res.on('error', (e) => push(e));
+      },
+    );
+
+    req.on('error', (e) => push(e));
+    req.setTimeout(120_000, () => {
+      req.destroy();
+      push(new Error('Ollama request timed out after 2 minutes'));
+    });
+    req.write(body);
+    req.end();
+
+    return {
+      [Symbol.asyncIterator]() {
+        return {
+          async next(): Promise<IteratorResult<OllamaChunk>> {
+            while (queue.length === 0) {
+              await new Promise<void>((r) => { notify = r; });
+            }
+            const item = queue.shift()!;
+            if (item === 'end') return { done: true, value: undefined as unknown as OllamaChunk };
+            if (item instanceof Error) throw item;
+            return { done: false, value: item };
+          },
+          return(): Promise<IteratorResult<OllamaChunk>> {
+            req.destroy();
+            return Promise.resolve({ done: true, value: undefined as unknown as OllamaChunk });
+          },
+        };
+      },
+    };
+  }
+
   private validateToolInput(name: ToolName, input: Record<string, unknown>): void {
-    const tool = TOOLS.find(t => t.name === name);
+    const tool = TOOLS.find(t => t.function.name === name);
     if (!tool) return;
-    const required = (tool.input_schema.required ?? []) as string[];
-    for (const field of required) {
+    for (const field of tool.function.parameters.required) {
       if (!(field in input) || input[field] === undefined || input[field] === '') {
         throw new Error(`Tool "${name}": missing required field "${field}"`);
       }
@@ -92,9 +165,6 @@ export class ClaudeService {
   }
 
   public async *agentLoop(userMessage: string): AsyncGenerator<AgentEvent> {
-    const client = this.getClient();
-    const { model, maxTokens } = this.getConfig();
-
     this.history.push({ role: 'user', content: userMessage });
     this.trimHistory();
 
@@ -102,69 +172,76 @@ export class ClaudeService {
     let totalOutputTokens = 0;
 
     for (let i = 0; i < MAX_ITERATIONS; i++) {
-      const stream = client.messages.stream({
-        model,
-        max_tokens: maxTokens,
-        system: [SYSTEM_BLOCK],
-        tools: TOOLS_WITH_CACHE,
-        messages: this.history,
-      });
+      const messages: OllamaMessage[] = [
+        { role: 'system', content: SYSTEM_PROMPT },
+        ...this.history,
+      ];
 
-      for await (const chunk of stream) {
-        if (
-          chunk.type === 'content_block_delta' &&
-          chunk.delta.type === 'text_delta' &&
-          chunk.delta.text
-        ) {
-          yield { type: 'text', text: chunk.delta.text };
+      let accContent = '';
+      let finalToolCalls: OllamaToolCall[] = [];
+      let hasText = false;
+
+      try {
+        for await (const chunk of this.streamOllama(messages)) {
+          if (chunk.error) {
+            yield { type: 'error', message: `Ollama error: ${chunk.error}` };
+            return;
+          }
+          if (chunk.message?.content) {
+            yield { type: 'text', text: chunk.message.content };
+            accContent += chunk.message.content;
+            hasText = true;
+          }
+          if (chunk.done) {
+            finalToolCalls = chunk.message?.tool_calls ?? [];
+            totalInputTokens += chunk.prompt_eval_count ?? 0;
+            totalOutputTokens += chunk.eval_count ?? 0;
+          }
         }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const friendly = msg.includes('ECONNREFUSED')
+          ? 'Cannot connect to Ollama. Make sure Ollama is running (`ollama serve`) and the model is installed (`ollama pull llama3.2`).'
+          : `Ollama error: ${msg}`;
+        yield { type: 'error', message: friendly };
+        return;
       }
 
-      const response = await stream.finalMessage();
+      if (hasText) yield { type: 'text_done' };
 
-      totalInputTokens += response.usage.input_tokens;
-      totalOutputTokens += response.usage.output_tokens;
-
-      this.history.push({ role: 'assistant', content: response.content });
-
-      const hasText = response.content.some(b => b.type === 'text' && b.text);
-      if (hasText) {
-        yield { type: 'text_done' };
-      }
-
-      if (response.stop_reason === 'end_turn') {
+      // No tool calls → conversation turn complete
+      if (finalToolCalls.length === 0) {
+        this.history.push({ role: 'assistant', content: accContent });
+        this.trimHistory();
         yield { type: 'done', inputTokens: totalInputTokens, outputTokens: totalOutputTokens };
         return;
       }
 
-      if (response.stop_reason !== 'tool_use') {
-        yield { type: 'done', inputTokens: totalInputTokens, outputTokens: totalOutputTokens };
-        return;
-      }
+      // Add assistant message with tool_calls to history
+      this.history.push({ role: 'assistant', content: accContent, tool_calls: finalToolCalls });
 
-      const toolResults: Anthropic.ToolResultBlockParam[] = [];
-
-      for (const block of response.content) {
-        if (block.type !== 'tool_use') continue;
-
-        const name = block.name as ToolName;
-        const input = block.input as Record<string, unknown>;
+      // Execute each tool call
+      for (let j = 0; j < finalToolCalls.length; j++) {
+        const toolCall = finalToolCalls[j]!;
+        const name = toolCall.function.name as ToolName;
+        const input = toolCall.function.arguments;
         const summary = summarizeTool(name, input);
+        const toolId = `${name}_${i}_${j}`;
 
-        yield { type: 'tool_start', id: block.id, name, summary };
+        yield { type: 'tool_start', id: toolId, name, summary };
 
         let result: string;
         let isError = false;
 
         try {
-          this.validateToolInput(name, input);
+          this.validateToolInput(name, input as Record<string, unknown>);
 
           if (REQUIRES_CONFIRMATION.has(name)) {
-            const approved = await this.confirmFn(block.id, name, summary);
+            const approved = await this.confirmFn(toolId, name, summary);
             if (!approved) {
               result = 'User denied this action.';
-              toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result });
-              yield { type: 'tool_done', id: block.id, result, isError: false };
+              this.history.push({ role: 'tool', content: result });
+              yield { type: 'tool_done', id: toolId, result, isError: false };
               continue;
             }
           }
@@ -175,11 +252,10 @@ export class ClaudeService {
           isError = true;
         }
 
-        toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result });
-        yield { type: 'tool_done', id: block.id, result, isError };
+        this.history.push({ role: 'tool', content: result });
+        yield { type: 'tool_done', id: toolId, result, isError };
       }
 
-      this.history.push({ role: 'user', content: toolResults });
       this.trimHistory();
     }
 

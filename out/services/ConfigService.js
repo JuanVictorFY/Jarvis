@@ -39,12 +39,12 @@ const path = __importStar(require("path"));
 const electron_1 = require("electron");
 const DEFAULTS = {
     anthropicApiKey: '',
-    model: 'claude-sonnet-4-6',
+    model: 'llama3.2',
     maxTokens: 8192,
     openaiApiKey: '',
     geminiApiKey: '',
     ollamaBaseUrl: 'http://localhost:11434',
-    defaultProvider: 'anthropic',
+    defaultProvider: 'ollama',
     theme: 'dark',
 };
 class ConfigService {

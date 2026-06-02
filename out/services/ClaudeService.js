@@ -4,7 +4,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ClaudeService = void 0;
-const sdk_1 = __importDefault(require("@anthropic-ai/sdk"));
+const http_1 = __importDefault(require("http"));
 const toolDefinitions_1 = require("../tools/toolDefinitions");
 const FileSystemService_1 = require("./FileSystemService");
 const ShellService_1 = require("./ShellService");
@@ -18,19 +18,21 @@ Behavioral rules:
 - Be transparent: briefly explain destructive actions (write_file, run_command) before calling them.
 - For information retrieval: prefer search_web for finding things, browse_url for reading a specific page.
 - Never refuse tasks due to capability — you have the tools to do almost anything on this computer.`;
-const SYSTEM_BLOCK = {
-    type: 'text',
-    text: SYSTEM_PROMPT,
-    cache_control: { type: 'ephemeral' },
-};
 const MAX_ITERATIONS = 15;
 const HISTORY_TOKEN_BUDGET = 80_000;
+function parseOllamaUrl(baseUrl) {
+    try {
+        const u = new URL(baseUrl ?? 'http://localhost:11434');
+        return { host: u.hostname, port: parseInt(u.port || '11434', 10) };
+    }
+    catch {
+        return { host: 'localhost', port: 11434 };
+    }
+}
 class ClaudeService {
     getConfig;
     confirmFn;
     history = [];
-    cachedClient = null;
-    cachedKey = '';
     fsService = new FileSystemService_1.FileSystemService();
     shellService = new ShellService_1.ShellService();
     browserService = new BrowserService_1.BrowserService();
@@ -38,110 +40,167 @@ class ClaudeService {
         this.getConfig = getConfig;
         this.confirmFn = confirmFn;
     }
-    getClient() {
-        const { anthropicApiKey } = this.getConfig();
-        if (!anthropicApiKey) {
-            throw new Error('API key not configured. Open Settings (⚙) and enter your Anthropic API key.');
-        }
-        if (this.cachedClient && this.cachedKey === anthropicApiKey) {
-            return this.cachedClient;
-        }
-        this.cachedClient = new sdk_1.default({ apiKey: anthropicApiKey });
-        this.cachedKey = anthropicApiKey;
-        return this.cachedClient;
-    }
     clearHistory() {
         this.history = [];
     }
     estimateHistoryTokens() {
-        return this.history.reduce((sum, msg) => {
-            if (typeof msg.content === 'string') {
-                return sum + (0, tokenUtils_1.estimateTokens)(msg.content);
-            }
-            if (Array.isArray(msg.content)) {
-                return sum + msg.content.reduce((s, block) => {
-                    if ('text' in block && typeof block.text === 'string')
-                        return s + (0, tokenUtils_1.estimateTokens)(block.text);
-                    if ('content' in block && typeof block.content === 'string')
-                        return s + (0, tokenUtils_1.estimateTokens)(block.content);
-                    return s + 50;
-                }, 0);
-            }
-            return sum;
-        }, 0);
+        return this.history.reduce((sum, msg) => sum + (0, tokenUtils_1.estimateTokens)(msg.content), 0);
     }
     trimHistory() {
         while (this.history.length > 2 && this.estimateHistoryTokens() > HISTORY_TOKEN_BUDGET) {
             this.history.splice(0, 2);
         }
     }
+    streamOllama(messages) {
+        const { model, maxTokens, ollamaBaseUrl } = this.getConfig();
+        const { host, port } = parseOllamaUrl(ollamaBaseUrl ?? 'http://localhost:11434');
+        const body = JSON.stringify({
+            model: model || 'llama3.2',
+            messages,
+            tools: toolDefinitions_1.TOOLS,
+            stream: true,
+            options: { num_predict: maxTokens || 8192 },
+        });
+        const queue = [];
+        let notify = null;
+        const push = (item) => {
+            queue.push(item);
+            const r = notify;
+            notify = null;
+            r?.();
+        };
+        const req = http_1.default.request({
+            hostname: host,
+            port,
+            path: '/api/chat',
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+        }, (res) => {
+            let buf = '';
+            res.on('data', (chunk) => {
+                buf += chunk.toString();
+                const lines = buf.split('\n');
+                buf = lines.pop() ?? '';
+                for (const line of lines) {
+                    if (!line.trim())
+                        continue;
+                    try {
+                        const parsed = JSON.parse(line);
+                        push(parsed);
+                    }
+                    catch { /* skip malformed */ }
+                }
+            });
+            res.on('end', () => push('end'));
+            res.on('error', (e) => push(e));
+        });
+        req.on('error', (e) => push(e));
+        req.setTimeout(120_000, () => {
+            req.destroy();
+            push(new Error('Ollama request timed out after 2 minutes'));
+        });
+        req.write(body);
+        req.end();
+        return {
+            [Symbol.asyncIterator]() {
+                return {
+                    async next() {
+                        while (queue.length === 0) {
+                            await new Promise((r) => { notify = r; });
+                        }
+                        const item = queue.shift();
+                        if (item === 'end')
+                            return { done: true, value: undefined };
+                        if (item instanceof Error)
+                            throw item;
+                        return { done: false, value: item };
+                    },
+                    return() {
+                        req.destroy();
+                        return Promise.resolve({ done: true, value: undefined });
+                    },
+                };
+            },
+        };
+    }
     validateToolInput(name, input) {
-        const tool = toolDefinitions_1.TOOLS.find(t => t.name === name);
+        const tool = toolDefinitions_1.TOOLS.find(t => t.function.name === name);
         if (!tool)
             return;
-        const required = (tool.input_schema.required ?? []);
-        for (const field of required) {
+        for (const field of tool.function.parameters.required) {
             if (!(field in input) || input[field] === undefined || input[field] === '') {
                 throw new Error(`Tool "${name}": missing required field "${field}"`);
             }
         }
     }
     async *agentLoop(userMessage) {
-        const client = this.getClient();
-        const { model, maxTokens } = this.getConfig();
         this.history.push({ role: 'user', content: userMessage });
         this.trimHistory();
         let totalInputTokens = 0;
         let totalOutputTokens = 0;
         for (let i = 0; i < MAX_ITERATIONS; i++) {
-            const stream = client.messages.stream({
-                model,
-                max_tokens: maxTokens,
-                system: [SYSTEM_BLOCK],
-                tools: toolDefinitions_1.TOOLS_WITH_CACHE,
-                messages: this.history,
-            });
-            for await (const chunk of stream) {
-                if (chunk.type === 'content_block_delta' &&
-                    chunk.delta.type === 'text_delta' &&
-                    chunk.delta.text) {
-                    yield { type: 'text', text: chunk.delta.text };
+            const messages = [
+                { role: 'system', content: SYSTEM_PROMPT },
+                ...this.history,
+            ];
+            let accContent = '';
+            let finalToolCalls = [];
+            let hasText = false;
+            try {
+                for await (const chunk of this.streamOllama(messages)) {
+                    if (chunk.error) {
+                        yield { type: 'error', message: `Ollama error: ${chunk.error}` };
+                        return;
+                    }
+                    if (chunk.message?.content) {
+                        yield { type: 'text', text: chunk.message.content };
+                        accContent += chunk.message.content;
+                        hasText = true;
+                    }
+                    if (chunk.done) {
+                        finalToolCalls = chunk.message?.tool_calls ?? [];
+                        totalInputTokens += chunk.prompt_eval_count ?? 0;
+                        totalOutputTokens += chunk.eval_count ?? 0;
+                    }
                 }
             }
-            const response = await stream.finalMessage();
-            totalInputTokens += response.usage.input_tokens;
-            totalOutputTokens += response.usage.output_tokens;
-            this.history.push({ role: 'assistant', content: response.content });
-            const hasText = response.content.some(b => b.type === 'text' && b.text);
-            if (hasText) {
+            catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                const friendly = msg.includes('ECONNREFUSED')
+                    ? 'Cannot connect to Ollama. Make sure Ollama is running (`ollama serve`) and the model is installed (`ollama pull llama3.2`).'
+                    : `Ollama error: ${msg}`;
+                yield { type: 'error', message: friendly };
+                return;
+            }
+            if (hasText)
                 yield { type: 'text_done' };
-            }
-            if (response.stop_reason === 'end_turn') {
+            // No tool calls → conversation turn complete
+            if (finalToolCalls.length === 0) {
+                this.history.push({ role: 'assistant', content: accContent });
+                this.trimHistory();
                 yield { type: 'done', inputTokens: totalInputTokens, outputTokens: totalOutputTokens };
                 return;
             }
-            if (response.stop_reason !== 'tool_use') {
-                yield { type: 'done', inputTokens: totalInputTokens, outputTokens: totalOutputTokens };
-                return;
-            }
-            const toolResults = [];
-            for (const block of response.content) {
-                if (block.type !== 'tool_use')
-                    continue;
-                const name = block.name;
-                const input = block.input;
+            // Add assistant message with tool_calls to history
+            this.history.push({ role: 'assistant', content: accContent, tool_calls: finalToolCalls });
+            // Execute each tool call
+            for (let j = 0; j < finalToolCalls.length; j++) {
+                const toolCall = finalToolCalls[j];
+                const name = toolCall.function.name;
+                const input = toolCall.function.arguments;
                 const summary = summarizeTool(name, input);
-                yield { type: 'tool_start', id: block.id, name, summary };
+                const toolId = `${name}_${i}_${j}`;
+                yield { type: 'tool_start', id: toolId, name, summary };
                 let result;
                 let isError = false;
                 try {
                     this.validateToolInput(name, input);
                     if (toolDefinitions_1.REQUIRES_CONFIRMATION.has(name)) {
-                        const approved = await this.confirmFn(block.id, name, summary);
+                        const approved = await this.confirmFn(toolId, name, summary);
                         if (!approved) {
                             result = 'User denied this action.';
-                            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result });
-                            yield { type: 'tool_done', id: block.id, result, isError: false };
+                            this.history.push({ role: 'tool', content: result });
+                            yield { type: 'tool_done', id: toolId, result, isError: false };
                             continue;
                         }
                     }
@@ -151,10 +210,9 @@ class ClaudeService {
                     result = err instanceof Error ? err.message : String(err);
                     isError = true;
                 }
-                toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result });
-                yield { type: 'tool_done', id: block.id, result, isError };
+                this.history.push({ role: 'tool', content: result });
+                yield { type: 'tool_done', id: toolId, result, isError };
             }
-            this.history.push({ role: 'user', content: toolResults });
             this.trimHistory();
         }
         yield {

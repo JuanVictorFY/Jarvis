@@ -1,79 +1,93 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TOOLS_WITH_CACHE = exports.REQUIRES_CONFIRMATION = exports.TOOLS = void 0;
+exports.REQUIRES_CONFIRMATION = exports.TOOLS = void 0;
 exports.TOOLS = [
     {
-        name: 'read_file',
-        description: 'Read the full contents of any file on the computer. Use absolute paths.',
-        input_schema: {
-            type: 'object',
-            properties: {
-                path: { type: 'string', description: 'Absolute path to the file' },
+        type: 'function',
+        function: {
+            name: 'read_file',
+            description: 'Read the full contents of any file on the computer. Use absolute paths.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    path: { type: 'string', description: 'Absolute path to the file' },
+                },
+                required: ['path'],
             },
-            required: ['path'],
         },
     },
     {
-        name: 'write_file',
-        description: 'Create or overwrite a file. Requires user confirmation.',
-        input_schema: {
-            type: 'object',
-            properties: {
-                path: { type: 'string', description: 'Absolute path of the file to write' },
-                content: { type: 'string', description: 'File content' },
+        type: 'function',
+        function: {
+            name: 'write_file',
+            description: 'Create or overwrite a file. Requires user confirmation.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    path: { type: 'string', description: 'Absolute path of the file to write' },
+                    content: { type: 'string', description: 'File content' },
+                },
+                required: ['path', 'content'],
             },
-            required: ['path', 'content'],
         },
     },
     {
-        name: 'list_directory',
-        description: 'List all files and subdirectories inside a directory.',
-        input_schema: {
-            type: 'object',
-            properties: {
-                path: { type: 'string', description: 'Absolute path to the directory' },
+        type: 'function',
+        function: {
+            name: 'list_directory',
+            description: 'List all files and subdirectories inside a directory.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    path: { type: 'string', description: 'Absolute path to the directory' },
+                },
+                required: ['path'],
             },
-            required: ['path'],
         },
     },
     {
-        name: 'run_command',
-        description: 'Execute a shell command. ALWAYS requires explicit user confirmation before running.',
-        input_schema: {
-            type: 'object',
-            properties: {
-                command: { type: 'string', description: 'Shell command to run' },
-                cwd: { type: 'string', description: 'Working directory (optional, defaults to home)' },
+        type: 'function',
+        function: {
+            name: 'run_command',
+            description: 'Execute a shell command. ALWAYS requires explicit user confirmation before running.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    command: { type: 'string', description: 'Shell command to run' },
+                    cwd: { type: 'string', description: 'Working directory (optional, defaults to home)' },
+                },
+                required: ['command'],
             },
-            required: ['command'],
         },
     },
     {
-        name: 'browse_url',
-        description: 'Open a URL in a headless browser and return the visible page text.',
-        input_schema: {
-            type: 'object',
-            properties: {
-                url: { type: 'string', description: 'Full URL including https://' },
+        type: 'function',
+        function: {
+            name: 'browse_url',
+            description: 'Open a URL in a headless browser and return the visible page text.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    url: { type: 'string', description: 'Full URL including https://' },
+                },
+                required: ['url'],
             },
-            required: ['url'],
         },
     },
     {
-        name: 'search_web',
-        description: 'Search the web via DuckDuckGo and return the top results with titles, URLs, and snippets.',
-        input_schema: {
-            type: 'object',
-            properties: {
-                query: { type: 'string', description: 'Search query' },
+        type: 'function',
+        function: {
+            name: 'search_web',
+            description: 'Search the web via DuckDuckGo and return the top results with titles, URLs, and snippets.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    query: { type: 'string', description: 'Search query' },
+                },
+                required: ['query'],
             },
-            required: ['query'],
         },
     },
 ];
 exports.REQUIRES_CONFIRMATION = new Set(['run_command', 'write_file']);
-// Same tools with cache_control on the last entry so Anthropic caches the full tool block.
-exports.TOOLS_WITH_CACHE = exports.TOOLS.map((tool, i) => i === exports.TOOLS.length - 1
-    ? { ...tool, cache_control: { type: 'ephemeral' } }
-    : tool);
 //# sourceMappingURL=toolDefinitions.js.map

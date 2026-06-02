@@ -76,40 +76,37 @@ settingsCancel?.addEventListener('click', () => settingsOvl?.classList.remove('v
 
 settingsSave?.addEventListener('click', async () => {
   await jarvis.saveConfig({
-    anthropicApiKey: cfgKey.value.trim(),
+    anthropicApiKey: cfgKey?.value.trim() ?? '',
     model:           cfgModel.value,
     maxTokens:       parseInt(cfgTokens.value, 10) || 8192,
     openaiApiKey:    cfgOpenAIKey?.value.trim() ?? '',
     geminiApiKey:    cfgGeminiKey?.value.trim() ?? '',
     ollamaBaseUrl:   cfgOllamaUrl?.value.trim() || 'http://localhost:11434',
-    defaultProvider: cfgProvider?.value ?? 'anthropic',
+    defaultProvider: cfgProvider?.value ?? 'ollama',
     theme:           cfgTheme?.value ?? 'dark',
   });
   settingsOvl?.classList.remove('visible');
 });
 
-async function openSettings() {
-  const cfg = await jarvis.getConfig();
-  cfgKey.value    = cfg.anthropicApiKey ?? '';
-  cfgModel.value  = cfg.model ?? 'claude-sonnet-4-6';
-  cfgTokens.value = String(cfg.maxTokens ?? 8192);
+function populateSettings(cfg) {
+  if (cfgKey)       cfgKey.value       = cfg.anthropicApiKey ?? '';
+  if (cfgModel)     cfgModel.value     = cfg.model ?? 'llama3.2';
+  if (cfgTokens)    cfgTokens.value    = String(cfg.maxTokens ?? 8192);
   if (cfgOpenAIKey) cfgOpenAIKey.value = cfg.openaiApiKey ?? '';
   if (cfgGeminiKey) cfgGeminiKey.value = cfg.geminiApiKey ?? '';
   if (cfgOllamaUrl) cfgOllamaUrl.value = cfg.ollamaBaseUrl ?? 'http://localhost:11434';
-  if (cfgProvider)  cfgProvider.value  = cfg.defaultProvider ?? 'anthropic';
+  if (cfgProvider)  cfgProvider.value  = cfg.defaultProvider ?? 'ollama';
   if (cfgTheme)     cfgTheme.value     = cfg.theme ?? 'dark';
+}
+
+async function openSettings() {
+  const cfg = await jarvis.getConfig();
+  populateSettings(cfg);
   settingsOvl?.classList.add('visible');
 }
 
 jarvis.onOpenSettings(cfg => {
-  cfgKey.value    = cfg.anthropicApiKey ?? '';
-  cfgModel.value  = cfg.model ?? 'claude-sonnet-4-6';
-  cfgTokens.value = String(cfg.maxTokens ?? 8192);
-  if (cfgOpenAIKey) cfgOpenAIKey.value = cfg.openaiApiKey ?? '';
-  if (cfgGeminiKey) cfgGeminiKey.value = cfg.geminiApiKey ?? '';
-  if (cfgOllamaUrl) cfgOllamaUrl.value = cfg.ollamaBaseUrl ?? 'http://localhost:11434';
-  if (cfgProvider)  cfgProvider.value  = cfg.defaultProvider ?? 'anthropic';
-  if (cfgTheme)     cfgTheme.value     = cfg.theme ?? 'dark';
+  populateSettings(cfg);
   settingsOvl?.classList.add('visible');
 });
 
@@ -372,7 +369,3 @@ function escHtml(s) {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 inputEl.focus();
-
-jarvis.getConfig().then(cfg => {
-  if (!cfg.anthropicApiKey) openSettings();
-});
