@@ -1,39 +1,16 @@
-import type { AIProvider } from './AIProvider';
-
-export class ProviderRegistry {
-  private readonly registered = new Map<string, AIProvider>();
-
-  register(provider: AIProvider): void {
-    this.registered.set(provider.id, provider);
-  }
-
-  unregister(id: string): void {
-    this.registered.delete(id);
-  }
-
-  get(id: string): AIProvider | undefined {
-    return this.registered.get(id);
-  }
-
-  has(id: string): boolean {
-    return this.registered.has(id);
-  }
-
-  list(): AIProvider[] {
-    return Array.from(this.registered.values());
-  }
-
-  listConfigured(): AIProvider[] {
-    return this.list().filter((p) => p.isConfigured());
-  }
-
-  ids(): string[] {
-    return Array.from(this.registered.keys());
-  }
-
-  count(): number {
-    return this.registered.size;
-  }
+export interface AIProvider {
+  id: string;
+  name: string;
+  models: string[];
+  chat(messages: Array<{role: string; content: string}>, model: string): AsyncIterable<string>;
 }
 
-export const globalProviderRegistry = new ProviderRegistry();
+export class ProviderRegistry {
+  private providers = new Map<string, AIProvider>();
+  private activeId: string | null = null;
+
+  register(provider: AIProvider): void { this.providers.set(provider.id, provider); }
+  setActive(id: string): void { if (!this.providers.has(id)) throw new Error(`Unknown provider: ${id}`); this.activeId = id; }
+  getActive(): AIProvider | null { return this.activeId ? (this.providers.get(this.activeId) ?? null) : null; }
+  list(): AIProvider[] { return [...this.providers.values()]; }
+}
