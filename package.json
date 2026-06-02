@@ -12,7 +12,8 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "dev": "npm run compile && electron .",
-    "build": "npm run compile && electron-builder"
+    "build": "npm run compile && electron-builder",
+    "test": "npm run compile && node --test out/tests/*.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.3",
