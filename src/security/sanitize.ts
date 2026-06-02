@@ -14,3 +14,4 @@ export function sanitizePath(input: string): string {
 // security patch 2
 // security patch 3
 // security patch 4
+// security patch 5
